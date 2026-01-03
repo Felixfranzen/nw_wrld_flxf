@@ -6,25 +6,60 @@ import {
   cleanupStaleTempFiles,
 } from "./atomicWrite.js";
 
-const USER_DATA_ARG_PREFIX = "--nwWrldUserDataDir=";
+const PROJECT_DIR_ARG_PREFIX = "--nwWrldProjectDir=";
+const REQUIRE_PROJECT_ARG_PREFIX = "--nwWrldRequireProject=";
 
-const getUserDataDirFromArgv = () => {
+const getProjectDirFromArgv = () => {
   const arg = (process.argv || []).find((a) =>
-    a.startsWith(USER_DATA_ARG_PREFIX)
+    a.startsWith(PROJECT_DIR_ARG_PREFIX)
   );
   if (!arg) return null;
-  const value = arg.slice(USER_DATA_ARG_PREFIX.length);
+  const value = arg.slice(PROJECT_DIR_ARG_PREFIX.length);
   return value || null;
 };
 
+const getRequireProjectFromArgv = () => {
+  const arg = (process.argv || []).find((a) =>
+    a.startsWith(REQUIRE_PROJECT_ARG_PREFIX)
+  );
+  if (!arg) return false;
+  const value = arg.slice(REQUIRE_PROJECT_ARG_PREFIX.length);
+  return value === "1" || value === "true";
+};
+
+const isExistingDirectory = (dirPath) => {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 export const getJsonDir = () => {
-  const userDataDir = getUserDataDirFromArgv();
-  if (userDataDir) {
-    const dir = path.join(userDataDir, "json");
+  const projectDir = getProjectDirFromArgv();
+  const requireProject = getRequireProjectFromArgv();
+  if (projectDir) {
+    if (!isExistingDirectory(projectDir)) {
+      globalThis.__NW_WRLD_PROJECT_STATUS__ = {
+        ok: false,
+        reason: "PROJECT_DIR_MISSING",
+        projectDir,
+      };
+      return path.join(__dirname, "..", "..", "shared", "json");
+    }
+    const dir = path.join(projectDir, "nw_wrld_data", "json");
     try {
       fs.mkdirSync(dir, { recursive: true });
     } catch {}
+    globalThis.__NW_WRLD_PROJECT_STATUS__ = { ok: true, projectDir };
     return dir;
+  }
+  if (requireProject) {
+    globalThis.__NW_WRLD_PROJECT_STATUS__ = {
+      ok: false,
+      reason: "NO_PROJECT_SELECTED",
+      projectDir: null,
+    };
   }
   const fallbackDir = path.join(__dirname, "..", "..", "shared", "json");
   return fallbackDir;
@@ -37,6 +72,7 @@ const getLegacyJsonDir = () => {
     path.join(process.cwd(), "src", "shared", "json"),
     path.join(__dirname, "..", "..", "shared", "json"),
   ];
+
   for (const dir of candidates) {
     try {
       if (fs.existsSync(dir)) return dir;
@@ -63,7 +99,9 @@ const maybeMigrateLegacyFile = (filename) => {
   } catch {}
 };
 
-cleanupStaleTempFiles(getJsonDir());
+try {
+  cleanupStaleTempFiles(getJsonDir());
+} catch {}
 
 export const loadJsonFile = async (filename, defaultValue, warningMsg) => {
   maybeMigrateLegacyFile(filename);
@@ -106,6 +144,13 @@ export const loadJsonFileSync = (filename, defaultValue, errorMsg) => {
 };
 
 export const saveJsonFile = async (filename, data) => {
+  const status = globalThis.__NW_WRLD_PROJECT_STATUS__;
+  if (status && status.ok === false) {
+    console.error(
+      `Refusing to write ${filename}: project folder is not available (${status.reason}).`
+    );
+    return;
+  }
   const filePath = getJsonFilePath(filename);
   try {
     const dataString = JSON.stringify(data, null, 2);
@@ -116,6 +161,13 @@ export const saveJsonFile = async (filename, data) => {
 };
 
 export const saveJsonFileSync = (filename, data) => {
+  const status = globalThis.__NW_WRLD_PROJECT_STATUS__;
+  if (status && status.ok === false) {
+    console.error(
+      `Refusing to write ${filename} (sync): project folder is not available (${status.reason}).`
+    );
+    return;
+  }
   const filePath = getJsonFilePath(filename);
   try {
     const dataString = JSON.stringify(data, null, 2);

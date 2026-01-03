@@ -95,6 +95,24 @@ import { MethodConfiguratorModal } from "./modals/MethodConfiguratorModal.jsx";
 import { TrackItem } from "./components/track/TrackItem.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 
+const PROJECT_DIR_ARG_PREFIX = "--nwWrldProjectDir=";
+const getProjectDirFromArgv = () => {
+  const arg = (process.argv || []).find((a) =>
+    a.startsWith(PROJECT_DIR_ARG_PREFIX)
+  );
+  if (!arg) return null;
+  const value = arg.slice(PROJECT_DIR_ARG_PREFIX.length);
+  return value || null;
+};
+
+const isExistingDirectory = (dirPath) => {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 // =========================
 // Components
 // =========================
@@ -458,6 +476,8 @@ const Dashboard = () => {
   const [isProjectorReady, setIsProjectorReady] = useState(false);
   const [workspacePath, setWorkspacePath] = useState(null);
   const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState(false);
+  const [workspaceModalMode, setWorkspaceModalMode] = useState("initial");
+  const [workspaceModalPath, setWorkspaceModalPath] = useState(null);
   const [workspaceModuleFiles, setWorkspaceModuleFiles] = useState([]);
   const [workspaceModuleLoadFailures, setWorkspaceModuleLoadFailures] =
     useState([]);
@@ -953,6 +973,10 @@ const Dashboard = () => {
 
   const loadModules = useCallback(async () => {
     try {
+      if (isWorkspaceModalOpen) return;
+      const projectDirArg = getProjectDirFromArgv();
+      if (!projectDirArg) return;
+      if (!workspacePath) return;
       if (workspacePath) {
         const modulesDir = path.join(workspacePath, "modules");
         let entries = [];
@@ -1004,60 +1028,11 @@ const Dashboard = () => {
         }
         return;
       }
-
-      const context = require.context("../projector/modules", false, /\.js$/);
-      const moduleKeys = context.keys();
-
-      const modules = moduleKeys.map((file) => {
-        try {
-          const moduleId = context.resolve(file);
-          if (
-            typeof __webpack_require__ !== "undefined" &&
-            __webpack_require__.c
-          ) {
-            delete __webpack_require__.c[moduleId];
-          }
-          Object.keys(require.cache)
-            .filter(
-              (k) =>
-                k.includes("projector/modules") &&
-                k.includes(file.replace("./", ""))
-            )
-            .forEach((k) => delete require.cache[k]);
-        } catch {}
-
-        try {
-          const mod = context(file).default || context(file);
-          if (!mod?.name) {
-            console.warn(
-              `Skipping module ${file}: missing required static property "name".`
-            );
-            return null;
-          }
-          return {
-            name: mod.name,
-            category: mod.category || "Undefined",
-            methods: mod.methods || [],
-          };
-        } catch (e) {
-          console.error(`Error loading module ${file}:`, e);
-          return null;
-        }
-      });
-
-      const validModules = modules.filter(Boolean);
-
-      setPredefinedModules(validModules);
-      setWorkspaceModuleFiles([]);
-      setWorkspaceModuleLoadFailures([]);
-
-      setIsProjectorReady(false);
-      sendToProjector("refresh-projector", {});
     } catch (error) {
       console.error("❌ [Dashboard] Error loading modules:", error);
       alert("Failed to load modules from ../projector/modules folder.");
     }
-  }, [sendToProjector, workspacePath]);
+  }, [isWorkspaceModalOpen, sendToProjector, workspacePath]);
 
   useEffect(() => {
     loadModules();
@@ -1134,12 +1109,18 @@ const Dashboard = () => {
       let activeTrackIdToUse = appState.activeTrackId;
       let activeSetIdToUse = appState.activeSetId;
       let sequencerMutedToUse = appState.sequencerMuted;
-      const workspacePathToUse =
-        data?.config?.workspacePath || appState.workspacePath || null;
+      const projectDir = getProjectDirFromArgv();
+      const workspacePathToUse = projectDir || null;
       workspacePathRef.current = workspacePathToUse;
       setIsSequencerMuted(Boolean(sequencerMutedToUse));
       setWorkspacePath(workspacePathToUse);
       if (!workspacePathToUse) {
+        setWorkspaceModalMode("initial");
+        setWorkspaceModalPath(null);
+        setIsWorkspaceModalOpen(true);
+      } else if (!isExistingDirectory(workspacePathToUse)) {
+        setWorkspaceModalMode("lostSync");
+        setWorkspaceModalPath(workspacePathToUse);
         setIsWorkspaceModalOpen(true);
       }
 
@@ -1178,19 +1159,15 @@ const Dashboard = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useIPCListener("workspace:lostSync", (event, payload) => {
+    const lostPath = payload?.workspacePath || workspacePathRef.current || null;
+    setWorkspaceModalMode("lostSync");
+    setWorkspaceModalPath(lostPath);
+    setIsWorkspaceModalOpen(true);
+  });
+
   const handleSelectWorkspace = useCallback(async () => {
-    const result = await ipcInvoke("workspace:select");
-    if (!result || result.cancelled || !result.workspacePath) return;
-    const nextPath = result.workspacePath;
-    workspacePathRef.current = nextPath;
-    setWorkspacePath(nextPath);
-    setIsWorkspaceModalOpen(false);
-    updateUserData(setUserData, (draft) => {
-      if (!draft.config) draft.config = {};
-      draft.config.workspacePath = nextPath;
-    });
-    const currentState = await loadAppState();
-    await saveAppState({ ...currentState, workspacePath: nextPath });
+    await ipcInvoke("workspace:select");
   }, [ipcInvoke]);
 
   const openAddModuleModal = useCallback((trackIndex) => {
@@ -1768,19 +1745,33 @@ const Dashboard = () => {
       />
 
       <Modal isOpen={isWorkspaceModalOpen} onClose={() => {}}>
-        <ModalHeader title="MODULES WORKSPACE" onClose={() => {}} />
+        <ModalHeader
+          title={
+            workspaceModalMode === "lostSync"
+              ? "PROJECT FOLDER NOT FOUND"
+              : "OPEN PROJECT"
+          }
+          onClose={() => {}}
+        />
         <div className="flex flex-col gap-4">
           <div className="text-neutral-300/70">
-            Choose a folder to store your modules. You can edit files in that
-            folder and nw_wrld will reload them automatically.
+            {workspaceModalMode === "lostSync"
+              ? "We lost sync with your project folder. It may have been moved or renamed. Reopen the project folder to continue."
+              : "Open (or create) a project folder to begin. Your project folder contains your modules and performance data."}
           </div>
-          {workspacePath ? (
-            <div className="text-neutral-300/50">{workspacePath}</div>
+          {workspaceModalPath || workspacePath ? (
+            <div className="text-neutral-300/50 break-all">
+              {workspaceModalPath || workspacePath}
+            </div>
           ) : null}
         </div>
         <ModalFooter>
           <div className="flex justify-end gap-3">
-            <Button onClick={handleSelectWorkspace}>CHOOSE FOLDER</Button>
+            <Button onClick={handleSelectWorkspace}>
+              {workspaceModalMode === "lostSync"
+                ? "REOPEN PROJECT"
+                : "OPEN PROJECT"}
+            </Button>
           </div>
         </ModalFooter>
       </Modal>

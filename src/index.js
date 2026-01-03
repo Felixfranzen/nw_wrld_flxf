@@ -26,6 +26,8 @@ let inputManager;
 let workspaceWatcher = null;
 let workspaceWatcherDebounce = null;
 let currentWorkspacePath = null;
+let currentProjectDir = null;
+let didRegisterAppLifecycleHandlers = false;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -72,52 +74,61 @@ const waitForWorkspaceSettle = async (modulesDir, filename) => {
 const getLegacyJsonDirForMain = () =>
   path.join(__dirname, "..", "src", "shared", "json");
 
-const getJsonDirForMain = () => {
-  const dir = path.join(app.getPath("userData"), "json");
+const isExistingDirectory = (dirPath) => {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+const getProjectJsonDirForMain = (projectDir) => {
+  if (!projectDir || typeof projectDir !== "string") return null;
+  if (!isExistingDirectory(projectDir)) return null;
+  const dir = path.join(projectDir, "nw_wrld_data", "json");
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch {}
-
-  // One-time best-effort migration from legacy dev location into userData
-  try {
-    const legacyDir = getLegacyJsonDirForMain();
-    [
-      "userData.json",
-      "appState.json",
-      "config.json",
-      "recordingData.json",
-    ].forEach((filename) => {
-      const destPath = path.join(dir, filename);
-      const legacyPath = path.join(legacyDir, filename);
-      if (!fs.existsSync(destPath) && fs.existsSync(legacyPath)) {
-        fs.copyFileSync(legacyPath, destPath);
-      }
-      const legacyBackupPath = `${legacyPath}.backup`;
-      const destBackupPath = `${destPath}.backup`;
-      if (
-        !fs.existsSync(destBackupPath) &&
-        fs.existsSync(legacyBackupPath) &&
-        !fs.existsSync(destPath)
-      ) {
-        fs.copyFileSync(legacyBackupPath, destBackupPath);
-      }
-    });
-  } catch {}
-
   return dir;
 };
 
-const getAppStatePathForMain = () =>
-  path.join(getJsonDirForMain(), "appState.json");
+const maybeMigrateJsonIntoProject = (projectDir) => {
+  if (!projectDir || typeof projectDir !== "string") return;
+  const destDir = getProjectJsonDirForMain(projectDir);
+  if (!destDir) return;
+  const legacyDir = getLegacyJsonDirForMain();
 
-const loadAppStateForMain = () => {
-  const appStatePath = getAppStatePathForMain();
-  try {
-    const data = fs.readFileSync(appStatePath, "utf-8");
-    return JSON.parse(data);
-  } catch {
-    return {};
-  }
+  [
+    "userData.json",
+    "appState.json",
+    "config.json",
+    "recordingData.json",
+  ].forEach((filename) => {
+    const destPath = path.join(destDir, filename);
+    if (fs.existsSync(destPath)) return;
+
+    const srcCandidates = [path.join(legacyDir, filename)];
+    const srcPath = srcCandidates.find((p) => {
+      try {
+        return fs.existsSync(p);
+      } catch {
+        return false;
+      }
+    });
+    if (!srcPath) return;
+
+    try {
+      fs.copyFileSync(srcPath, destPath);
+    } catch {}
+
+    const srcBackupPath = `${srcPath}.backup`;
+    const destBackupPath = `${destPath}.backup`;
+    try {
+      if (!fs.existsSync(destBackupPath) && fs.existsSync(srcBackupPath)) {
+        fs.copyFileSync(srcBackupPath, destBackupPath);
+      }
+    } catch {}
+  });
 };
 
 const broadcastWorkspaceModulesChanged = () => {
@@ -139,6 +150,26 @@ const broadcastWorkspaceModulesChanged = () => {
   }
 };
 
+const broadcastWorkspaceLostSync = (workspacePath) => {
+  const payload = { workspacePath: workspacePath || null };
+  if (
+    dashboardWindow &&
+    !dashboardWindow.isDestroyed() &&
+    dashboardWindow.webContents &&
+    !dashboardWindow.webContents.isDestroyed()
+  ) {
+    dashboardWindow.webContents.send("workspace:lostSync", payload);
+  }
+  if (
+    projector1Window &&
+    !projector1Window.isDestroyed() &&
+    projector1Window.webContents &&
+    !projector1Window.webContents.isDestroyed()
+  ) {
+    projector1Window.webContents.send("workspace:lostSync", payload);
+  }
+};
+
 const startWorkspaceWatcher = (workspacePath) => {
   if (!workspacePath || typeof workspacePath !== "string") {
     currentWorkspacePath = null;
@@ -152,6 +183,18 @@ const startWorkspaceWatcher = (workspacePath) => {
   }
 
   if (workspacePath === currentWorkspacePath && workspaceWatcher) {
+    return;
+  }
+
+  if (!isExistingDirectory(workspacePath)) {
+    currentWorkspacePath = null;
+    if (workspaceWatcher) {
+      try {
+        workspaceWatcher.close();
+      } catch {}
+      workspaceWatcher = null;
+    }
+    broadcastWorkspaceLostSync(workspacePath);
     return;
   }
 
@@ -188,6 +231,7 @@ const startWorkspaceWatcher = (workspacePath) => {
         workspaceWatcher.close();
       } catch {}
       workspaceWatcher = null;
+      broadcastWorkspaceLostSync(workspacePath);
     });
   } catch {
     workspaceWatcher = null;
@@ -249,9 +293,20 @@ ipcMain.on("log-to-main", (event, message) => {
 const ensureWorkspaceScaffold = async (workspacePath) => {
   if (!workspacePath || typeof workspacePath !== "string") return;
 
+  try {
+    fs.mkdirSync(workspacePath, { recursive: true });
+  } catch {}
+  if (!isExistingDirectory(workspacePath)) return;
+
   const modulesDir = path.join(workspacePath, "modules");
   try {
     fs.mkdirSync(modulesDir, { recursive: true });
+  } catch {}
+
+  try {
+    fs.mkdirSync(path.join(workspacePath, "nw_wrld_data", "json"), {
+      recursive: true,
+    });
   } catch {}
 
   const readmePath = path.join(workspacePath, "README.md");
@@ -393,12 +448,35 @@ ipcMain.handle("workspace:select", async () => {
   }
   const workspacePath = result.filePaths[0];
   await ensureWorkspaceScaffold(workspacePath);
-  startWorkspaceWatcher(workspacePath);
+  maybeMigrateJsonIntoProject(workspacePath);
+  currentProjectDir = workspacePath;
+
+  const closeWindow = (win) =>
+    new Promise((resolve) => {
+      if (!win || win.isDestroyed()) return resolve();
+      win.once("closed", () => resolve());
+      try {
+        win.close();
+      } catch {
+        resolve();
+      }
+    });
+
+  await Promise.all([
+    closeWindow(dashboardWindow),
+    closeWindow(projector1Window),
+  ]);
+  dashboardWindow = null;
+  projector1Window = null;
+
+  createWindow(workspacePath);
   return { cancelled: false, workspacePath };
 });
 
-function loadConfig() {
-  const configPath = path.join(getJsonDirForMain(), "userData.json");
+function loadConfig(projectDir) {
+  const baseDir = getProjectJsonDirForMain(projectDir);
+  if (!baseDir) return DEFAULT_USER_DATA;
+  const configPath = path.join(baseDir, "userData.json");
 
   try {
     const data = fs.readFileSync(configPath, "utf-8");
@@ -424,14 +502,17 @@ function loadConfig() {
   }
 }
 
-function createWindow() {
+function createWindow(projectDir) {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } =
     primaryDisplay.workAreaSize;
   const { x: screenX, y: screenY } = primaryDisplay.workArea;
 
   const halfWidth = Math.floor(screenWidth / 2);
-  const additionalArgs = [`--nwWrldUserDataDir=${app.getPath("userData")}`];
+  const additionalArgs = ["--nwWrldRequireProject=1"];
+  if (projectDir && typeof projectDir === "string") {
+    additionalArgs.push(`--nwWrldProjectDir=${projectDir}`);
+  }
 
   // Create Projector 1 Window with optimized preferences
   projector1Window = new BrowserWindow({
@@ -490,7 +571,7 @@ function createWindow() {
   dashboardWindow.loadFile("dashboard/views/dashboard.html");
 
   dashboardWindow.webContents.once("did-finish-load", () => {
-    const fullConfig = loadConfig();
+    const fullConfig = loadConfig(projectDir);
     inputManager = new InputManager(dashboardWindow, projector1Window);
     const { DEFAULT_INPUT_CONFIG } = require("./shared/config/defaultConfig");
     const inputConfig = fullConfig.config?.input || DEFAULT_INPUT_CONFIG;
@@ -499,20 +580,16 @@ function createWindow() {
     });
   });
 
-  const appState = loadAppStateForMain();
-  if (appState && appState.workspacePath) {
-    startWorkspaceWatcher(appState.workspacePath);
+  if (projectDir && typeof projectDir === "string") {
+    startWorkspaceWatcher(projectDir);
   }
 
-  app.on("window-all-closed", function () {
-    if (process.platform !== "darwin") app.quit();
-  });
-
-  // Clear cache on startup for consistent performance
-  app.on("ready", () => {
-    const { session } = require("electron");
-    session.defaultSession.clearCache();
-  });
+  if (!didRegisterAppLifecycleHandlers) {
+    didRegisterAppLifecycleHandlers = true;
+    app.on("window-all-closed", function () {
+      if (process.platform !== "darwin") app.quit();
+    });
+  }
 }
 
 // Handle app ready state
@@ -534,11 +611,15 @@ app.whenReady().then(() => {
     }
   }
 
-  createWindow();
+  currentProjectDir = null;
+  createWindow(null);
 
   // Handle app activation (macOS)
   app.on("activate", function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      currentProjectDir = null;
+      createWindow(null);
+    }
   });
 });
 

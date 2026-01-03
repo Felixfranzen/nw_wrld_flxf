@@ -65,6 +65,13 @@ const Projector = {
   moduleClassCache: new Map(),
   workspaceModuleClassCache: new Map(),
   workspacePath: null,
+  getProjectDirFromArgv() {
+    const prefix = "--nwWrldProjectDir=";
+    const arg = (process.argv || []).find((a) => a.startsWith(prefix));
+    if (!arg) return null;
+    const value = arg.slice(prefix.length);
+    return value || null;
+  },
   async loadModuleClass(moduleType) {
     if (!moduleType) {
       return null;
@@ -533,7 +540,8 @@ const Projector = {
           const appStateData = fs.readFileSync(appStatePath, "utf-8");
           const appState = JSON.parse(appStateData);
           activeSetId = appState.activeSetId;
-          this.workspacePath = appState.workspacePath || null;
+          const projectDir = this.getProjectDirFromArgv();
+          this.workspacePath = projectDir || appState.workspacePath || null;
           console.log(
             "🔍 [Projector] Loaded activeSetId from appState:",
             activeSetId
@@ -542,7 +550,7 @@ const Projector = {
           console.warn(
             "⚠️ [Projector] Could not load appState.json, falling back to default set"
           );
-          this.workspacePath = null;
+          this.workspacePath = this.getProjectDirFromArgv();
           activeSetId = null;
         }
       }

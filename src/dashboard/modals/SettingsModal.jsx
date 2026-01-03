@@ -247,16 +247,14 @@ export const SettingsModal = ({
 
         <div className="flex flex-col gap-2 font-mono border-t border-neutral-800 pt-6">
           <div className="pl-12">
-            <div className="opacity-50 mb-1 text-[11px]">
-              Modules Workspace:
-            </div>
+            <div className="opacity-50 mb-1 text-[11px]">Project Folder:</div>
             <div className="text-[11px] text-neutral-300/70 break-all">
               {workspacePath || "Not set"}
             </div>
           </div>
           <div className="pl-12">
             <Button onClick={onSelectWorkspace} className="w-full">
-              {workspacePath ? "CHANGE WORKSPACE" : "SELECT WORKSPACE"}
+              {workspacePath ? "OPEN ANOTHER PROJECT" : "OPEN PROJECT"}
             </Button>
           </div>
         </div>
