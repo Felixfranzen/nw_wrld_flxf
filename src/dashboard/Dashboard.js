@@ -352,29 +352,18 @@ const Dashboard = () => {
     const debouncedSave = setTimeout(async () => {
       await saveUserData(userData);
       userDataSaveTimeoutRef.current = null;
+
+      const tracks = getActiveSetTracks(userData, activeSetId);
+      const track = tracks.find((t) => t.id === activeTrackId);
+
+      sendToProjector("reload-data", {
+        setId: activeSetId,
+        trackName: track?.name || null,
+      });
     }, 500);
     userDataSaveTimeoutRef.current = debouncedSave;
     return () => clearTimeout(debouncedSave);
-  }, [userData]);
-
-  useEffect(() => {
-    if (isInitialMount.current || !userData?.config?.autoRefresh) {
-      return;
-    }
-
-    const debouncedRefresh = setTimeout(() => {
-      pauseAllPlayback();
-      setIsProjectorReady(false);
-      sendToProjector("refresh-projector", {});
-    }, 500);
-    return () => clearTimeout(debouncedRefresh);
-  }, [
-    userData?.sets,
-    userData?.config?.aspectRatio,
-    userData?.config?.bgColor,
-    pauseAllPlayback,
-    sendToProjector,
-  ]);
+  }, [userData, activeSetId, activeTrackId, sendToProjector]);
 
   useEffect(() => {
     if (isInitialMount.current) {
@@ -425,7 +414,6 @@ const Dashboard = () => {
 
   const [aspectRatio, setAspectRatio] = useState("landscape");
   const [bgColor, setBgColor] = useState("grey");
-  const [autoRefresh, setAutoRefresh] = useState(false);
   const [inputConfig, setInputConfig] = useState({
     type: "midi",
     deviceName: "IAC Driver Bus 1",
@@ -522,7 +510,7 @@ const Dashboard = () => {
     );
     setFooterPlaybackState({});
 
-    const tracks = getActiveSetTracks(userData, activeSetId);
+    const tracks = getActiveSetTracks(userDataRef.current || {}, activeSetId);
     const track = tracks.find((t) => t.id === activeTrackId);
 
     if (track) {
@@ -536,7 +524,7 @@ const Dashboard = () => {
     } else {
       setIsProjectorReady(true);
     }
-  }, [activeTrackId, userData, activeSetId]);
+  }, [activeTrackId, activeSetId, sendToProjector]);
 
   const openConfirmationModal = useCallback((message, onConfirm) => {
     setConfirmationModal({ message, onConfirm, type: "confirm" });
@@ -586,7 +574,6 @@ const Dashboard = () => {
   useEffect(() => {
     loadSettings().then((loadedSettings) => {
       setSettings(loadedSettings);
-      setAutoRefresh(loadedSettings.autoRefresh || false);
     });
 
     invokeIPC("input:get-midi-devices").then((devices) => {
@@ -603,9 +590,6 @@ const Dashboard = () => {
     if (userData.config) {
       setAspectRatio(userData.config.aspectRatio || "landscape");
       setBgColor(userData.config.bgColor || "grey");
-      if (userData.config.autoRefresh !== undefined) {
-        setAutoRefresh(userData.config.autoRefresh);
-      }
     }
   }, [userData]);
 
@@ -620,12 +604,6 @@ const Dashboard = () => {
       draft.config.bgColor = bgColor;
     });
   }, [bgColor]);
-
-  useEffect(() => {
-    updateUserData(setUserData, (draft) => {
-      draft.config.autoRefresh = autoRefresh;
-    });
-  }, [autoRefresh]);
 
   useEffect(() => {
     if (isInitialMount.current) {
@@ -996,14 +974,13 @@ const Dashboard = () => {
 
       setPredefinedModules(validModules);
 
-      pauseAllPlayback();
       setIsProjectorReady(false);
       sendToProjector("refresh-projector", {});
     } catch (error) {
       console.error("❌ [Dashboard] Error loading modules:", error);
       alert("Failed to load modules from ../projector/modules folder.");
     }
-  }, [pauseAllPlayback]);
+  }, [sendToProjector]);
 
   useEffect(() => {
     loadModules();
@@ -1581,8 +1558,6 @@ const Dashboard = () => {
         setAspectRatio={setAspectRatio}
         bgColor={bgColor}
         setBgColor={setBgColor}
-        autoRefresh={autoRefresh}
-        setAutoRefresh={setAutoRefresh}
         settings={settings}
         inputConfig={inputConfig}
         setInputConfig={setInputConfig}

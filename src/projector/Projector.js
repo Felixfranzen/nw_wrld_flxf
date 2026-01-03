@@ -5,6 +5,7 @@ import {
   forEach,
   get,
   isEmpty,
+  isEqual,
   isFunction,
   fromPairs,
   map,
@@ -83,6 +84,7 @@ const Projector = {
   isDeactivating: false,
   isLoadingTrack: false,
   pendingTrackName: null,
+  pendingReloadData: null,
   previewModuleName: null,
   debugOverlayActive: false,
   debugLogQueue: [],
@@ -189,6 +191,48 @@ const Projector = {
 
         if (type === "refresh-projector") {
           return this.refreshPage();
+        }
+
+        if (type === "reload-data") {
+          if (this.isLoadingTrack) {
+            this.pendingReloadData = {
+              setId: props.setId,
+              trackName: props.trackName || this.activeTrack?.name,
+            };
+            return;
+          }
+
+          const currentTrackName = props.trackName || this.activeTrack?.name;
+          this.loadUserData(props.setId);
+          this.applyConfigSettings();
+
+          if (currentTrackName) {
+            const nextTrack = find(this.userData, { name: currentTrackName });
+            if (
+              this.activeTrack &&
+              this.activeTrack.name === currentTrackName &&
+              nextTrack &&
+              isEqual(
+                {
+                  name: this.activeTrack.name,
+                  modules: this.activeTrack.modules,
+                  modulesData: this.activeTrack.modulesData,
+                  channelMappings: this.activeTrack.channelMappings,
+                },
+                {
+                  name: nextTrack.name,
+                  modules: nextTrack.modules,
+                  modulesData: nextTrack.modulesData,
+                  channelMappings: nextTrack.channelMappings,
+                }
+              )
+            ) {
+              return;
+            }
+            this.deactivateActiveTrack();
+            return this.handleTrackSelection(currentTrackName);
+          }
+          return;
         }
 
         if (type === "set-activate") {
@@ -675,6 +719,41 @@ const Projector = {
       logger.log(`🔄 [TRACK] Loading pending track: "${nextTrack}"`);
       this.handleTrackSelection(nextTrack);
       return;
+    }
+
+    if (this.pendingReloadData) {
+      const pending = this.pendingReloadData;
+      this.pendingReloadData = null;
+      this.loadUserData(pending.setId);
+      this.applyConfigSettings();
+      if (pending.trackName) {
+        const nextTrack = find(this.userData, { name: pending.trackName });
+        if (
+          this.activeTrack &&
+          this.activeTrack.name === pending.trackName &&
+          nextTrack &&
+          isEqual(
+            {
+              name: this.activeTrack.name,
+              modules: this.activeTrack.modules,
+              modulesData: this.activeTrack.modulesData,
+              channelMappings: this.activeTrack.channelMappings,
+            },
+            {
+              name: nextTrack.name,
+              modules: nextTrack.modules,
+              modulesData: nextTrack.modulesData,
+              channelMappings: nextTrack.channelMappings,
+            }
+          )
+        ) {
+          // no-op
+        } else {
+          this.deactivateActiveTrack();
+          this.handleTrackSelection(pending.trackName);
+          return;
+        }
+      }
     }
 
     // Only send ready when no pending track

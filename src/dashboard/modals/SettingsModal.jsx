@@ -2,7 +2,7 @@ import React from "react";
 import { Modal } from "../shared/Modal.jsx";
 import { ModalHeader } from "../components/ModalHeader.js";
 import { Button } from "../components/Button.js";
-import { Select, NumberInput, RadioButton, Checkbox } from "../components/FormInputs.js";
+import { Select, NumberInput, RadioButton } from "../components/FormInputs.js";
 import { HelpIcon } from "../components/HelpIcon.js";
 import { HELP_TEXT } from "../../shared/helpText.js";
 
@@ -11,8 +11,6 @@ const ProjectorSettings = ({
   setAspectRatio,
   bgColor,
   setBgColor,
-  autoRefresh,
-  setAutoRefresh,
   settings,
 }) => {
   return (
@@ -51,20 +49,6 @@ const ProjectorSettings = ({
           ))}
         </Select>
       </div>
-
-      <div className="pl-12">
-        <div className="relative inline-block">
-          <label className="flex items-center gap-2 cursor-pointer text-[11px]">
-            <Checkbox
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="w-4 h-4"
-            />
-            <span className="opacity-50">Auto-Refresh Projector</span>
-          </label>
-          <HelpIcon helpText={HELP_TEXT.autoRefresh} />
-        </div>
-      </div>
     </div>
   );
 };
@@ -76,8 +60,6 @@ export const SettingsModal = ({
   setAspectRatio,
   bgColor,
   setBgColor,
-  autoRefresh,
-  setAutoRefresh,
   settings,
   inputConfig,
   setInputConfig,
@@ -258,8 +240,6 @@ export const SettingsModal = ({
           setAspectRatio={setAspectRatio}
           bgColor={bgColor}
           setBgColor={setBgColor}
-          autoRefresh={autoRefresh}
-          setAutoRefresh={setAutoRefresh}
           settings={settings}
         />
       </div>
