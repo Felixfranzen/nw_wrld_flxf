@@ -26,14 +26,18 @@ import { HelpIcon } from "./HelpIcon.js";
 import { HELP_TEXT } from "../../shared/helpText.js";
 
 const TEMPLATES = {
-  basic: (moduleName) => `import ModuleBase from "../helpers/moduleBase.js";
+  basic: (moduleName) => `const { ModuleBase } = globalThis.nwWrldSdk || {};
+
+if (!ModuleBase) {
+  throw new Error("nwWrldSdk.ModuleBase is not available");
+}
 
 class ${moduleName} extends ModuleBase {
   static name = "${moduleName}";
   static category = "Custom";
 
   static methods = [
-    ...ModuleBase.methods,
+    ...((ModuleBase && ModuleBase.methods) || []),
     {
       name: "exampleMethod",
       executeOnLoad: false,
@@ -47,13 +51,13 @@ class ${moduleName} extends ModuleBase {
     },
   ];
 
-  constructor(container, variation = null) {
-    super(container, variation);
+  constructor(container) {
+    super(container);
     this.init();
   }
 
   init() {
-    // Initialize your visuals here
+    if (!this.elem) return;
     const html = \`
       <div style="
         position: absolute;
@@ -70,11 +74,10 @@ class ${moduleName} extends ModuleBase {
   }
 
   exampleMethod({ param1 = 100 }) {
-    // Your method logic here
+    void param1;
   }
 
   destroy() {
-    // Clean up here
     super.destroy();
   }
 }
@@ -84,15 +87,22 @@ export default ${moduleName};
 
   threejs: (
     moduleName
-  ) => `import BaseThreeJsModule from "../helpers/threeBase.js";
-import * as THREE from "three";
+  ) => `const { BaseThreeJsModule } = globalThis.nwWrldSdk || {};
+const THREE = globalThis.THREE;
+
+if (!BaseThreeJsModule) {
+  throw new Error("nwWrldSdk.BaseThreeJsModule is not available");
+}
+if (!THREE) {
+  throw new Error("THREE is not available");
+}
 
 class ${moduleName} extends BaseThreeJsModule {
   static name = "${moduleName}";
   static category = "3D";
 
   static methods = [
-    ...BaseThreeJsModule.methods,
+    ...((BaseThreeJsModule && BaseThreeJsModule.methods) || []),
     {
       name: "exampleMethod",
       executeOnLoad: false,
@@ -106,16 +116,16 @@ class ${moduleName} extends BaseThreeJsModule {
     },
   ];
 
-  constructor(container, variation = null) {
-    super(container, variation);
+  constructor(container) {
+    super(container);
     this.customGroup = new THREE.Group();
     this.init();
   }
 
   init() {
     if (this.destroyed) return;
+    if (!this.scene || !this.camera) return;
 
-    // Create a simple cube as example
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
     this.cube = new THREE.Mesh(geometry, material);
@@ -124,7 +134,6 @@ class ${moduleName} extends BaseThreeJsModule {
 
     this.camera.position.z = 5;
 
-    // Set custom animation loop
     this.setCustomAnimate(this.animateLoop.bind(this));
   }
 
@@ -155,15 +164,22 @@ class ${moduleName} extends BaseThreeJsModule {
 export default ${moduleName};
 `,
 
-  p5js: (moduleName) => `import ModuleBase from "../helpers/moduleBase.js";
-import p5 from "p5";
+  p5js: (moduleName) => `const { ModuleBase } = globalThis.nwWrldSdk || {};
+const p5 = globalThis.p5;
+
+if (!ModuleBase) {
+  throw new Error("nwWrldSdk.ModuleBase is not available");
+}
+if (!p5) {
+  throw new Error("p5 is not available");
+}
 
 class ${moduleName} extends ModuleBase {
   static name = "${moduleName}";
   static category = "2D";
 
   static methods = [
-    ...ModuleBase.methods,
+    ...((ModuleBase && ModuleBase.methods) || []),
     {
       name: "exampleMethod",
       executeOnLoad: false,
@@ -177,14 +193,15 @@ class ${moduleName} extends ModuleBase {
     },
   ];
 
-  constructor(container, variation = null) {
-    super(container, variation);
+  constructor(container) {
+    super(container);
     this.p5Instance = null;
     this.param1Value = 255;
     this.init();
   }
 
   init() {
+    if (!this.elem) return;
     const sketch = (p) => {
       p.setup = () => {
         p.createCanvas(this.elem.offsetWidth, this.elem.offsetHeight);
@@ -237,7 +254,9 @@ export const ModuleEditorModal = ({
 
   const moduleData = useMemo(() => {
     if (!moduleName) return null;
-    return predefinedModules.find((m) => m.name === moduleName);
+    return predefinedModules.find(
+      (m) => m.id === moduleName || m.name === moduleName
+    );
   }, [predefinedModules, moduleName]);
 
   const filePath = useMemo(() => {

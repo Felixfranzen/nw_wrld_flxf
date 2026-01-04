@@ -68,7 +68,7 @@ export const AddModuleModal = ({
         .substr(2, 9)}`;
       track.modules.push({
         id: instanceId,
-        type: module.name,
+        type: module.id || module.name,
       });
       const constructorMethods = module.methods
         .filter((m) => m.executeOnLoad)
@@ -171,7 +171,7 @@ export const AddModuleModal = ({
                     const previewData = {
                       type: "preview-module",
                       props: {
-                        moduleName: module.name,
+                        moduleName: module.id || module.name,
                         moduleData: {
                           constructor: finalConstructorMethods,
                           methods: {},
@@ -188,7 +188,7 @@ export const AddModuleModal = ({
 
                   return (
                     <div
-                      key={module.name}
+                      key={module.id || module.name}
                       className="flex items-center gap-1 group"
                     >
                       <div className="font-mono text-[11px] text-neutral-300 uppercase flex-1">
@@ -211,7 +211,7 @@ export const AddModuleModal = ({
                         <Button
                           onClick={(e) => {
                             e.stopPropagation();
-                            onEditModule(module.name);
+                            onEditModule(module.id || module.name);
                           }}
                           type="secondary"
                           icon={<FaCode />}

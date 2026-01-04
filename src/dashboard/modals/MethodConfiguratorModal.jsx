@@ -137,7 +137,9 @@ export const MethodConfiguratorModal = ({
 
   const module = useMemo(() => {
     if (!selectedChannel) return null;
-    return predefinedModules.find((m) => m.name === selectedChannel.moduleType);
+    return predefinedModules.find(
+      (m) => m.id === selectedChannel.moduleType || m.name === selectedChannel.moduleType
+    );
   }, [predefinedModules, selectedChannel]);
 
   const selectedModuleType = selectedChannel?.moduleType || null;
@@ -481,7 +483,7 @@ export const MethodConfiguratorModal = ({
                             moduleName={module ? module.name : null}
                             onShowMethodCode={(methodName) => {
                               setSelectedMethodForCode({
-                                moduleName: module.name,
+                                moduleName: module?.id || module?.name || null,
                                 methodName,
                               });
                             }}

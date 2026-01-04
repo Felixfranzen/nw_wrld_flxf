@@ -481,6 +481,7 @@ const Dashboard = () => {
   const [workspaceModuleFiles, setWorkspaceModuleFiles] = useState([]);
   const [workspaceModuleLoadFailures, setWorkspaceModuleLoadFailures] =
     useState([]);
+  const didMigrateWorkspaceModuleTypesRef = useRef(false);
   const loadModulesRunIdRef = useRef(0);
   const sequencerEngineRef = useRef(null);
   const sequencerAudioRef = useRef(null);
@@ -1000,6 +1001,13 @@ const Dashboard = () => {
           jsFiles.map(async (file) => {
             const fullPath = path.join(modulesDir, file);
             try {
+              const moduleId = path.basename(file, ".js");
+              if (!/^[A-Za-z][A-Za-z0-9]*$/.test(moduleId)) {
+                console.warn(
+                  `Skipping module ${file}: filename must be alphanumeric and start with a letter.`
+                );
+                return null;
+              }
               let mtimeMs = Date.now();
               try {
                 mtimeMs = (await fs.promises.stat(fullPath)).mtimeMs;
@@ -1007,14 +1015,15 @@ const Dashboard = () => {
               const fileUrl = `${pathToFileURL(fullPath).href}?t=${mtimeMs}`;
               const imported = await import(/* webpackIgnore: true */ fileUrl);
               const mod = imported?.default || imported;
-              if (!mod?.name) {
-                console.warn(
-                  `Skipping module ${file}: missing required static property "name".`
-                );
-                return null;
-              }
+              const displayName =
+                mod?.displayName ||
+                mod?.title ||
+                mod?.label ||
+                mod?.name ||
+                moduleId;
               return {
-                name: mod.name,
+                id: moduleId,
+                name: displayName,
                 category: mod.category || "Undefined",
                 methods: mod.methods || [],
               };
@@ -1045,6 +1054,103 @@ const Dashboard = () => {
   useEffect(() => {
     loadModules();
   }, [loadModules]);
+
+  // One-time, safe migration: if a track references a module by display name
+  // but the actual module file is named differently, rewrite to filename id.
+  useEffect(() => {
+    try {
+      if (!workspacePath) {
+        didMigrateWorkspaceModuleTypesRef.current = false;
+        return;
+      }
+      if (didMigrateWorkspaceModuleTypesRef.current) return;
+      if (!Array.isArray(predefinedModules) || predefinedModules.length === 0)
+        return;
+
+      const workspaceFileSet = new Set(
+        (workspaceModuleFiles || []).filter(Boolean)
+      );
+      if (workspaceFileSet.size === 0) return;
+
+      const displayNameToId = new Map();
+      const dupes = new Set();
+      predefinedModules.forEach((m) => {
+        const displayName = m?.name ? String(m.name) : "";
+        const id = m?.id ? String(m.id) : "";
+        if (!displayName || !id) return;
+        if (displayNameToId.has(displayName)) {
+          dupes.add(displayName);
+          return;
+        }
+        displayNameToId.set(displayName, id);
+      });
+      dupes.forEach((d) => displayNameToId.delete(d));
+
+      if (displayNameToId.size === 0) {
+        didMigrateWorkspaceModuleTypesRef.current = true;
+        return;
+      }
+
+      let needsChange = false;
+      const sets = userData?.sets;
+      if (Array.isArray(sets)) {
+        for (const set of sets) {
+          const tracks = set?.tracks;
+          if (!Array.isArray(tracks)) continue;
+          for (const track of tracks) {
+            const mods = track?.modules;
+            if (!Array.isArray(mods)) continue;
+            for (const inst of mods) {
+              const t = inst?.type;
+              if (!t || typeof t !== "string") continue;
+              if (workspaceFileSet.has(t)) continue;
+              const mapped = displayNameToId.get(t);
+              if (mapped && workspaceFileSet.has(mapped)) {
+                needsChange = true;
+                break;
+              }
+            }
+            if (needsChange) break;
+          }
+          if (needsChange) break;
+        }
+      }
+      if (!needsChange) {
+        didMigrateWorkspaceModuleTypesRef.current = true;
+        return;
+      }
+
+      updateUserData(setUserData, (draft) => {
+        if (!Array.isArray(draft?.sets)) return;
+        draft.sets.forEach((set) => {
+          if (!Array.isArray(set?.tracks)) return;
+          set.tracks.forEach((track) => {
+            if (!Array.isArray(track?.modules)) return;
+            track.modules.forEach((inst) => {
+              const t = inst?.type;
+              if (!t || typeof t !== "string") return;
+              if (workspaceFileSet.has(t)) return;
+              const mapped = displayNameToId.get(t);
+              if (mapped && workspaceFileSet.has(mapped)) {
+                inst.type = mapped;
+              }
+            });
+          });
+        });
+      });
+
+      didMigrateWorkspaceModuleTypesRef.current = true;
+    } catch (e) {
+      didMigrateWorkspaceModuleTypesRef.current = true;
+      console.warn("[Dashboard] Workspace module type migration skipped:", e);
+    }
+  }, [
+    workspacePath,
+    predefinedModules,
+    workspaceModuleFiles,
+    userData,
+    setUserData,
+  ]);
 
   useIPCListener(
     "workspace:modulesChanged",

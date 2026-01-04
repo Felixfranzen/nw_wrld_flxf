@@ -120,7 +120,7 @@ class PulsingCircle extends ModuleBase {
     ...ModuleBase.methods, // Inherit base methods
     {
       name: "pulse",
-      autoLoad: false,
+      executeOnLoad: false,
       options: [
         {
           name: "intensity",
@@ -136,7 +136,7 @@ class PulsingCircle extends ModuleBase {
     },
     {
       name: "setColor",
-      autoLoad: true,
+      executeOnLoad: true,
       options: [
         {
           name: "color",
@@ -290,7 +290,7 @@ myMethod({ param1 = defaultValue, param2 = defaultValue }) {
 }
 ```
 
-Methods with `autoLoad: true` run automatically after `init()` for initial setup. Methods with `autoLoad: false` wait for sequencer or external triggers. Always use default parameters.
+Methods with `executeOnLoad: true` run automatically after `init()` for initial setup. Methods with `executeOnLoad: false` wait for sequencer or external triggers. Always use default parameters.
 
 ### 4. Destruction Phase
 
@@ -423,6 +423,7 @@ Base class for Three.js 3D modules (extends ModuleBase).
 
 ```javascript
 const { BaseThreeJsModule } = globalThis.nwWrldSdk || {};
+const THREE = globalThis.THREE;
 
 class My3DModule extends BaseThreeJsModule {
   static name = "My3DModule";
@@ -811,6 +812,7 @@ class My3DModule extends BaseThreeJsModule {
   }
 
   init() {
+    if (!THREE) return;
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
     this.cube = new THREE.Mesh(geometry, material);
@@ -902,7 +904,6 @@ The following libraries are available globally in workspace modules:
 - **p5** - `globalThis.p5` - Creative coding and canvas drawing
 - **THREE** - `globalThis.THREE` - 3D graphics
 - **d3** - `globalThis.d3` - Data visualization
-- **Tone** - `globalThis.Tone` - Audio synthesis (optional)
 
 ---
 
