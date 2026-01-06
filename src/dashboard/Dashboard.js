@@ -8,8 +8,6 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { atom, useAtom } from "jotai";
-import fs from "fs";
-import path from "path";
 import {
   FaBars,
   FaCog,
@@ -39,6 +37,7 @@ import {
 } from "../shared/json/recordingUtils.js";
 import {
   loadAppState,
+  loadAppStateSync,
   saveAppState,
   saveAppStateSync,
 } from "../shared/json/appStateUtils.js";
@@ -92,6 +91,7 @@ import { SelectTrackModal } from "./modals/SelectTrackModal.jsx";
 import { MethodConfiguratorModal } from "./modals/MethodConfiguratorModal.jsx";
 import { TrackItem } from "./components/track/TrackItem.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
+import { getProjectDir } from "../shared/utils/projectDir.js";
 
 // =========================
 // Components
@@ -314,10 +314,12 @@ const Dashboard = () => {
 
   const activeTrackIdRef = useRef(activeTrackId);
   const activeSetIdRef = useRef(activeSetId);
+  const workspacePathRef = useRef(workspacePath);
   useEffect(() => {
     activeTrackIdRef.current = activeTrackId;
     activeSetIdRef.current = activeSetId;
-  }, [activeTrackId, activeSetId]);
+    workspacePathRef.current = workspacePath;
+  }, [activeTrackId, activeSetId, workspacePath]);
 
   // Recording state management
   const [recordingState, setRecordingState] = useAtom(recordingStateAtom);
@@ -398,10 +400,13 @@ const Dashboard = () => {
         // Now do sync saves with latest state
         saveUserDataSync(userDataRef.current);
         saveRecordingDataSync(recordingDataRef.current);
+        const currentAppState = loadAppStateSync();
         const appStateToSave = {
+          ...currentAppState,
           activeTrackId: activeTrackIdRef.current,
           activeSetId: activeSetIdRef.current,
           sequencerMuted: sequencerMutedRef.current,
+          workspacePath: workspacePathRef.current,
         };
         saveAppStateSync(appStateToSave);
       } catch (e) {
@@ -449,6 +454,15 @@ const Dashboard = () => {
   const [sequencerCurrentStep, setSequencerCurrentStep] = useState(0);
   const [isSequencerMuted, setIsSequencerMuted] = useState(false);
   const [isProjectorReady, setIsProjectorReady] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState(null);
+  const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState(false);
+  const [workspaceModalMode, setWorkspaceModalMode] = useState("initial");
+  const [workspaceModalPath, setWorkspaceModalPath] = useState(null);
+  const [workspaceModuleFiles, setWorkspaceModuleFiles] = useState([]);
+  const [workspaceModuleLoadFailures, setWorkspaceModuleLoadFailures] =
+    useState([]);
+  const didMigrateWorkspaceModuleTypesRef = useRef(false);
+  const loadModulesRunIdRef = useRef(0);
   const sequencerEngineRef = useRef(null);
   const sequencerAudioRef = useRef(null);
   const sequencerMutedRef = useRef(false);
@@ -610,11 +624,20 @@ const Dashboard = () => {
       return;
     }
 
-    saveAppState({
-      activeTrackId,
-      activeSetId,
-      sequencerMuted: isSequencerMuted,
-    });
+    const updateAppState = async () => {
+      const currentState = await loadAppState();
+      const preservedWorkspacePath =
+        workspacePathRef.current ?? currentState.workspacePath ?? null;
+      const stateToSave = {
+        ...currentState,
+        activeTrackId,
+        activeSetId,
+        sequencerMuted: isSequencerMuted,
+        workspacePath: preservedWorkspacePath,
+      };
+      await saveAppState(stateToSave);
+    };
+    updateAppState();
   }, [isSequencerMuted, activeTrackId, activeSetId]);
 
   const isInitialMountInput = useRef(true);
@@ -632,9 +655,28 @@ const Dashboard = () => {
     isInitialMountInput.current = false;
   }, [inputConfig]);
 
+  const prevSequencerModeRef = useRef(undefined);
+  useEffect(() => {
+    const next = userData?.config?.sequencerMode;
+    const prev = prevSequencerModeRef.current;
+    prevSequencerModeRef.current = next;
+
+    if (prev === true && next === false) {
+      invokeIPC("input:configure", inputConfig).catch((err) => {
+        console.error("[Dashboard] Failed to configure input:", err);
+      });
+    }
+  }, [userData?.config?.sequencerMode, inputConfig, invokeIPC]);
+
   useIPCListener("from-projector", (event, data) => {
     if (data.type === "debug-log") {
-      const logEntries = data.log.split("\n\n").filter((entry) => entry.trim());
+      const rawLog =
+        typeof data.log === "string"
+          ? data.log
+          : typeof data.props?.log === "string"
+          ? data.props.log
+          : "";
+      const logEntries = rawLog.split("\n\n").filter((entry) => entry.trim());
       setDebugLogs((prev) => {
         const newLogs = [...prev, ...logEntries];
         return newLogs.slice(-200);
@@ -908,6 +950,43 @@ const Dashboard = () => {
     }
   });
 
+  useIPCListener("from-projector", (event, data) => {
+    if (data.type !== "module-introspect-result") return;
+    const payload = data.props || {};
+    const moduleId = payload.moduleId;
+    if (!moduleId) return;
+
+    if (payload.ok) {
+      setPredefinedModules((prev) =>
+        (prev || []).map((m) =>
+          m && m.id === moduleId
+            ? {
+                ...m,
+                methods: Array.isArray(payload.methods) ? payload.methods : [],
+                status: "ready",
+              }
+            : m
+        )
+      );
+      setWorkspaceModuleLoadFailures((prev) =>
+        (prev || []).filter((id) => id !== moduleId)
+      );
+    } else {
+      setWorkspaceModuleLoadFailures((prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        if (list.includes(moduleId)) return list;
+        return [...list, moduleId];
+      });
+      setPredefinedModules((prev) =>
+        (prev || []).map((m) =>
+          m && m.id === moduleId ? { ...m, status: "failed" } : m
+        )
+      );
+    }
+  });
+
+  const ipcInvoke = useIPCInvoke();
+
   const pauseAllPlayback = useCallback(() => {
     if (sequencerEngineRef.current) {
       sequencerEngineRef.current.stop();
@@ -928,84 +1007,182 @@ const Dashboard = () => {
     setFooterPlaybackState({});
   }, []);
 
-  const loadModules = useCallback(() => {
+  const loadModules = useCallback(async () => {
+    const runId = ++loadModulesRunIdRef.current;
+    const isStale = () => runId !== loadModulesRunIdRef.current;
     try {
-      const context = require.context("../projector/modules", false, /\.js$/);
-      const moduleKeys = context.keys();
-
-      const modules = moduleKeys.map((file) => {
-        try {
-          const moduleId = context.resolve(file);
-          if (
-            typeof __webpack_require__ !== "undefined" &&
-            __webpack_require__.c
-          ) {
-            delete __webpack_require__.c[moduleId];
-          }
-          Object.keys(require.cache)
-            .filter(
-              (k) =>
-                k.includes("projector/modules") &&
-                k.includes(file.replace("./", ""))
-            )
-            .forEach((k) => delete require.cache[k]);
-        } catch {}
-
-        try {
-          const mod = context(file).default || context(file);
-          if (!mod?.name) {
-            console.warn(
-              `Skipping module ${file}: missing required static property "name".`
-            );
-            return null;
-          }
-          return {
-            name: mod.name,
-            category: mod.category || "Undefined",
-            methods: mod.methods || [],
-          };
-        } catch (e) {
-          console.error(`Error loading module ${file}:`, e);
-          return null;
+      if (isWorkspaceModalOpen) return;
+      const projectDirArg = getProjectDir();
+      if (!projectDirArg) return;
+      if (!workspacePath) return;
+      let summaries = [];
+      try {
+        const bridge = globalThis.nwWrldBridge;
+        if (
+          bridge &&
+          bridge.workspace &&
+          typeof bridge.workspace.listModuleSummaries === "function"
+        ) {
+          summaries = await bridge.workspace.listModuleSummaries();
+        } else {
+          summaries = [];
         }
-      });
+      } catch {
+        summaries = [];
+      }
+      const safeSummaries = Array.isArray(summaries) ? summaries : [];
+      const allModuleIds = safeSummaries
+        .map((s) => (s?.id ? String(s.id) : ""))
+        .filter(Boolean);
+      const listable = safeSummaries.filter((s) => Boolean(s?.hasMetadata));
+      if (isStale()) return;
+      setWorkspaceModuleFiles(allModuleIds);
 
-      const validModules = modules.filter(Boolean);
-
+      const validModules = listable
+        .map((s) => {
+          const moduleId = s?.id ? String(s.id) : "";
+          const name = s?.name ? String(s.name) : "";
+          const category = s?.category ? String(s.category) : "";
+          if (!moduleId || !name || !category) return null;
+          if (!/^[A-Za-z][A-Za-z0-9]*$/.test(moduleId)) return null;
+          return {
+            id: moduleId,
+            name,
+            category,
+            methods: [],
+            status: "uninspected",
+          };
+        })
+        .filter(Boolean);
+      if (isStale()) return;
       setPredefinedModules(validModules);
-
+      setWorkspaceModuleLoadFailures([]);
       setIsProjectorReady(false);
+      if (isStale()) return;
       sendToProjector("refresh-projector", {});
+      return;
     } catch (error) {
       console.error("❌ [Dashboard] Error loading modules:", error);
-      alert("Failed to load modules from ../projector/modules folder.");
+      alert("Failed to load modules from project folder.");
     }
-  }, [sendToProjector]);
+  }, [isWorkspaceModalOpen, sendToProjector, workspacePath]);
 
   useEffect(() => {
     loadModules();
   }, [loadModules]);
 
-  // Accept HMR updates for modules context so dashboard doesn't full reload
+  // One-time, safe migration: if a track references a module by display name
+  // but the actual module file is named differently, rewrite to filename id.
   useEffect(() => {
     try {
-      // Create a stable context reference purely for HMR subscription
-      const hmrContext = require.context(
-        "../projector/modules",
-        false,
-        /\.js$/
-      );
-      if (
-        module &&
-        module.hot &&
-        hmrContext &&
-        typeof hmrContext.id !== "undefined"
-      ) {
-        module.hot.accept(hmrContext.id, () => {
-          loadModules();
-        });
+      if (!workspacePath) {
+        didMigrateWorkspaceModuleTypesRef.current = false;
+        return;
       }
-      // Also accept changes to base helpers that affect available methods
+      if (didMigrateWorkspaceModuleTypesRef.current) return;
+      if (!Array.isArray(predefinedModules) || predefinedModules.length === 0)
+        return;
+
+      const workspaceFileSet = new Set(
+        (workspaceModuleFiles || []).filter(Boolean)
+      );
+      if (workspaceFileSet.size === 0) return;
+
+      const displayNameToId = new Map();
+      const dupes = new Set();
+      predefinedModules.forEach((m) => {
+        const displayName = m?.name ? String(m.name) : "";
+        const id = m?.id ? String(m.id) : "";
+        if (!displayName || !id) return;
+        if (displayNameToId.has(displayName)) {
+          dupes.add(displayName);
+          return;
+        }
+        displayNameToId.set(displayName, id);
+      });
+      dupes.forEach((d) => displayNameToId.delete(d));
+
+      if (displayNameToId.size === 0) {
+        didMigrateWorkspaceModuleTypesRef.current = true;
+        return;
+      }
+
+      let needsChange = false;
+      const sets = userData?.sets;
+      if (Array.isArray(sets)) {
+        for (const set of sets) {
+          const tracks = set?.tracks;
+          if (!Array.isArray(tracks)) continue;
+          for (const track of tracks) {
+            const mods = track?.modules;
+            if (!Array.isArray(mods)) continue;
+            for (const inst of mods) {
+              const t = inst?.type;
+              if (!t || typeof t !== "string") continue;
+              if (workspaceFileSet.has(t)) continue;
+              const mapped = displayNameToId.get(t);
+              if (mapped && workspaceFileSet.has(mapped)) {
+                needsChange = true;
+                break;
+              }
+            }
+            if (needsChange) break;
+          }
+          if (needsChange) break;
+        }
+      }
+      if (!needsChange) {
+        didMigrateWorkspaceModuleTypesRef.current = true;
+        return;
+      }
+
+      updateUserData(setUserData, (draft) => {
+        if (!Array.isArray(draft?.sets)) return;
+        draft.sets.forEach((set) => {
+          if (!Array.isArray(set?.tracks)) return;
+          set.tracks.forEach((track) => {
+            if (!Array.isArray(track?.modules)) return;
+            track.modules.forEach((inst) => {
+              const t = inst?.type;
+              if (!t || typeof t !== "string") return;
+              if (workspaceFileSet.has(t)) return;
+              const mapped = displayNameToId.get(t);
+              if (mapped && workspaceFileSet.has(mapped)) {
+                inst.type = mapped;
+              }
+            });
+          });
+        });
+      });
+
+      didMigrateWorkspaceModuleTypesRef.current = true;
+    } catch (e) {
+      didMigrateWorkspaceModuleTypesRef.current = true;
+      console.warn("[Dashboard] Workspace module type migration skipped:", e);
+    }
+  }, [
+    workspacePath,
+    predefinedModules,
+    workspaceModuleFiles,
+    userData,
+    setUserData,
+  ]);
+
+  useIPCListener(
+    "workspace:modulesChanged",
+    () => {
+      if (workspacePath) {
+        loadModules();
+        return;
+      }
+      loadModules();
+    },
+    [loadModules]
+  );
+
+  // Accept HMR updates for base helpers so dashboard doesn't full reload
+  useEffect(() => {
+    try {
       if (module && module.hot) {
         try {
           module.hot.accept("../projector/helpers/moduleBase.js", () => {
@@ -1018,12 +1195,7 @@ const Dashboard = () => {
           });
         } catch {}
       }
-    } catch (e) {
-      console.warn(
-        "⚠️ [HMR] Unable to register HMR for modules context:",
-        e.message
-      );
-    }
+    } catch (e) {}
   }, [loadModules]);
 
   const isInitialMount = useRef(true);
@@ -1041,12 +1213,32 @@ const Dashboard = () => {
       const recordings = await loadRecordingData();
 
       const appState = await loadAppState();
-
       let activeTrackIdToUse = appState.activeTrackId;
       let activeSetIdToUse = appState.activeSetId;
       let sequencerMutedToUse = appState.sequencerMuted;
-
+      const projectDir = getProjectDir();
+      const workspacePathToUse = projectDir || null;
+      workspacePathRef.current = workspacePathToUse;
       setIsSequencerMuted(Boolean(sequencerMutedToUse));
+      setWorkspacePath(workspacePathToUse);
+      if (!workspacePathToUse) {
+        setWorkspaceModalMode("initial");
+        setWorkspaceModalPath(null);
+        setIsWorkspaceModalOpen(true);
+      } else {
+        const bridge = globalThis.nwWrldBridge;
+        const isAvailable =
+          bridge &&
+          bridge.project &&
+          typeof bridge.project.isDirAvailable === "function"
+            ? bridge.project.isDirAvailable()
+            : false;
+        if (!isAvailable) {
+          setWorkspaceModalMode("lostSync");
+          setWorkspaceModalPath(workspacePathToUse);
+          setIsWorkspaceModalOpen(true);
+        }
+      }
 
       if (activeSetIdToUse) {
         setActiveSetId(activeSetIdToUse);
@@ -1082,6 +1274,17 @@ const Dashboard = () => {
     initializeUserData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useIPCListener("workspace:lostSync", (event, payload) => {
+    const lostPath = payload?.workspacePath || workspacePathRef.current || null;
+    setWorkspaceModalMode("lostSync");
+    setWorkspaceModalPath(lostPath);
+    setIsWorkspaceModalOpen(true);
+  });
+
+  const handleSelectWorkspace = useCallback(async () => {
+    await ipcInvoke("workspace:select");
+  }, [ipcInvoke]);
 
   const openAddModuleModal = useCallback((trackIndex) => {
     setSelectedTrackForModuleMenu(trackIndex);
@@ -1478,6 +1681,11 @@ const Dashboard = () => {
                         isSequencerPlaying={isSequencerPlaying}
                         sequencerCurrentStep={sequencerCurrentStep}
                         handleSequencerToggle={handleSequencerToggle}
+                        workspacePath={workspacePath}
+                        workspaceModuleFiles={workspaceModuleFiles}
+                        workspaceModuleLoadFailures={
+                          workspaceModuleLoadFailures
+                        }
                       />
                     );
                   })}
@@ -1568,6 +1776,8 @@ const Dashboard = () => {
         }}
         config={userData.config}
         updateConfig={updateConfig}
+        workspacePath={workspacePath}
+        onSelectWorkspace={handleSelectWorkspace}
       />
       <InputMappingsModal
         isOpen={isInputMappingsModalOpen}
@@ -1605,11 +1815,13 @@ const Dashboard = () => {
         templateType={editingTemplateType}
         onModuleSaved={null}
         predefinedModules={predefinedModules}
+        workspacePath={workspacePath}
       />
       <NewModuleDialog
         isOpen={isNewModuleDialogOpen}
         onClose={() => setIsNewModuleDialogOpen(false)}
         onCreateModule={handleCreateModule}
+        workspacePath={workspacePath}
       />
       <DebugOverlayModal
         isOpen={isDebugOverlayOpen}
@@ -1622,6 +1834,9 @@ const Dashboard = () => {
         predefinedModules={predefinedModules}
         onEditChannel={handleEditChannel}
         onDeleteChannel={handleDeleteChannel}
+        workspacePath={workspacePath}
+        workspaceModuleFiles={workspaceModuleFiles}
+        workspaceModuleLoadFailures={workspaceModuleLoadFailures}
       />
       <EditChannelModal
         isOpen={editChannelModalState.isOpen}
@@ -1644,6 +1859,39 @@ const Dashboard = () => {
         onConfirm={confirmationModal?.onConfirm}
         type={confirmationModal?.type || "confirm"}
       />
+
+      <Modal isOpen={isWorkspaceModalOpen} onClose={() => {}}>
+        <ModalHeader
+          title={
+            workspaceModalMode === "lostSync"
+              ? "PROJECT FOLDER NOT FOUND"
+              : "OPEN PROJECT"
+          }
+          onClose={() => {}}
+          showClose={false}
+        />
+        <div className="flex flex-col gap-4">
+          <div className="text-neutral-300/70">
+            {workspaceModalMode === "lostSync"
+              ? "We lost sync with your project folder. It may have been moved or renamed. Reopen the project folder to continue."
+              : "Open (or create) a project folder to begin. Your project folder contains your modules and performance data."}
+          </div>
+          {workspaceModalPath || workspacePath ? (
+            <div className="text-neutral-300/50 break-all">
+              {workspaceModalPath || workspacePath}
+            </div>
+          ) : null}
+        </div>
+        <ModalFooter>
+          <div className="flex justify-end gap-3">
+            <Button onClick={handleSelectWorkspace}>
+              {workspaceModalMode === "lostSync"
+                ? "REOPEN PROJECT"
+                : "OPEN PROJECT"}
+            </Button>
+          </div>
+        </ModalFooter>
+      </Modal>
     </div>
   );
 };

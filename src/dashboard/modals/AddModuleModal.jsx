@@ -68,19 +68,39 @@ export const AddModuleModal = ({
         .substr(2, 9)}`;
       track.modules.push({
         id: instanceId,
-        type: module.name,
+        type: module.id || module.name,
       });
-      const constructorMethods = module.methods
-        .filter((m) => m.executeOnLoad)
-        .map((m) => ({
-          name: m.name,
-          options: m?.options?.length
-            ? m.options.map((opt) => ({
-                name: opt.name,
-                value: opt.defaultVal,
-              }))
-            : null,
-        }));
+      const moduleMethods = Array.isArray(module.methods) ? module.methods : [];
+      const hasMethodData = moduleMethods.length > 0;
+      const constructorMethods = hasMethodData
+        ? moduleMethods
+            .filter((m) => m.executeOnLoad)
+            .map((m) => ({
+              name: m.name,
+              options: m?.options?.length
+                ? m.options.map((opt) => ({
+                    name: opt.name,
+                    value: opt.defaultVal,
+                  }))
+                : [],
+            }))
+        : [];
+
+      if (!constructorMethods.some((m) => m.name === "matrix")) {
+        constructorMethods.unshift({
+          name: "matrix",
+          options: [
+            { name: "matrix", value: { rows: 1, cols: 1, excludedCells: [] } },
+            { name: "border", value: false },
+          ],
+        });
+      }
+      if (!constructorMethods.some((m) => m.name === "show")) {
+        constructorMethods.push({
+          name: "show",
+          options: [{ name: "duration", value: 0 }],
+        });
+      }
       track.modulesData[instanceId] = {
         constructor: constructorMethods,
         methods: {},
@@ -117,61 +137,59 @@ export const AddModuleModal = ({
               <div className="pl-6 uppercase flex flex-col flex-wrap gap-2">
                 {modules.map((module) => {
                   const handlePreview = () => {
-                    const constructorMethods = module.methods
-                      .filter((m) => m.executeOnLoad)
-                      .map((m) => ({
-                        name: m.name,
-                        options: m?.options?.length
-                          ? m.options.map((opt) => ({
-                              name: opt.name,
-                              value: opt.defaultVal,
-                            }))
-                          : null,
-                      }));
+                    const moduleMethods = Array.isArray(module.methods)
+                      ? module.methods
+                      : [];
+                    const hasMethodData = moduleMethods.length > 0;
 
-                    const matrixMethod = module.methods.find(
-                      (m) => m.name === "matrix"
-                    );
-                    const showMethod = module.methods.find(
-                      (m) => m.name === "show"
-                    );
+                    if (!hasMethodData) {
+                      sendToProjector("module-introspect", {
+                        moduleId: module.id || module.name,
+                      });
+                    }
+
+                    const constructorMethods = hasMethodData
+                      ? moduleMethods
+                          .filter((m) => m.executeOnLoad)
+                          .map((m) => ({
+                            name: m.name,
+                            options: m?.options?.length
+                              ? m.options.map((opt) => ({
+                                  name: opt.name,
+                                  value: opt.defaultVal,
+                                }))
+                              : null,
+                          }))
+                      : [];
 
                     const finalConstructorMethods = [...constructorMethods];
-
                     if (
-                      matrixMethod &&
                       !finalConstructorMethods.some((m) => m.name === "matrix")
                     ) {
                       finalConstructorMethods.unshift({
                         name: "matrix",
-                        options: matrixMethod?.options?.length
-                          ? matrixMethod.options.map((opt) => ({
-                              name: opt.name,
-                              value: opt.defaultVal,
-                            }))
-                          : null,
+                        options: [
+                          {
+                            name: "matrix",
+                            value: { rows: 1, cols: 1, excludedCells: [] },
+                          },
+                          { name: "border", value: false },
+                        ],
                       });
                     }
-
                     if (
-                      showMethod &&
                       !finalConstructorMethods.some((m) => m.name === "show")
                     ) {
                       finalConstructorMethods.push({
                         name: "show",
-                        options: showMethod?.options?.length
-                          ? showMethod.options.map((opt) => ({
-                              name: opt.name,
-                              value: opt.defaultVal,
-                            }))
-                          : null,
+                        options: [{ name: "duration", value: 0 }],
                       });
                     }
 
                     const previewData = {
                       type: "preview-module",
                       props: {
-                        moduleName: module.name,
+                        moduleName: module.id || module.name,
                         moduleData: {
                           constructor: finalConstructorMethods,
                           methods: {},
@@ -188,7 +206,7 @@ export const AddModuleModal = ({
 
                   return (
                     <div
-                      key={module.name}
+                      key={module.id || module.name}
                       className="flex items-center gap-1 group"
                     >
                       <div className="font-mono text-[11px] text-neutral-300 uppercase flex-1">
@@ -211,7 +229,7 @@ export const AddModuleModal = ({
                         <Button
                           onClick={(e) => {
                             e.stopPropagation();
-                            onEditModule(module.name);
+                            onEditModule(module.id || module.name);
                           }}
                           type="secondary"
                           icon={<FaCode />}

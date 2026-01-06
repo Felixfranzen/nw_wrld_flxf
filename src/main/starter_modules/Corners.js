@@ -1,13 +1,13 @@
-import ModuleBase from "../helpers/moduleBase.js";
+/*
+@nwWrld name: Corners
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase
+*/
 
 class Corners extends ModuleBase {
-  static name = "Corners";
-  static category = "2D";
-
   static methods = [
-    ...ModuleBase.methods,
     {
-      name: "setColor",
+      name: "color",
       executeOnLoad: true,
       options: [
         {
@@ -18,7 +18,7 @@ class Corners extends ModuleBase {
       ],
     },
     {
-      name: "setSize",
+      name: "size",
       executeOnLoad: true,
       options: [
         {
@@ -90,12 +90,12 @@ class Corners extends ModuleBase {
     ctx.stroke();
   }
 
-  setColor({ color = "#ffffff" }) {
+  color({ color = "#ffffff" } = {}) {
     this.color = color;
     this.drawCarets();
   }
 
-  setSize({ size = 20 }) {
+  size({ size = 20 } = {}) {
     this.size = size;
     this.drawCarets();
   }

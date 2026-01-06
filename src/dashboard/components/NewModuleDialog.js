@@ -3,8 +3,6 @@ import { Button } from "./Button.js";
 import { ModalHeader } from "./ModalHeader.js";
 import { ModalFooter } from "./ModalFooter.js";
 import { TextInput, Select, Label } from "./FormInputs.js";
-import fs from "fs";
-import path from "path";
 
 const Modal = ({ isOpen, onClose, children, size = "small" }) => {
   if (!isOpen) return null;
@@ -22,7 +20,12 @@ const Modal = ({ isOpen, onClose, children, size = "small" }) => {
   );
 };
 
-export const NewModuleDialog = ({ isOpen, onClose, onCreateModule }) => {
+export const NewModuleDialog = ({
+  isOpen,
+  onClose,
+  onCreateModule,
+  workspacePath = null,
+}) => {
   const [moduleName, setModuleName] = useState("");
   const [templateType, setTemplateType] = useState("basic");
   const [error, setError] = useState("");
@@ -37,11 +40,15 @@ export const NewModuleDialog = ({ isOpen, onClose, onCreateModule }) => {
       return "Module name must start with uppercase letter and contain only letters and numbers";
     }
 
-    // Check if file already exists
+    // Check if file already exists (workspace modules)
     try {
-      const srcDir = path.join(__dirname, "..", "..");
-      const filePath = path.join(srcDir, "projector", "modules", `${name}.js`);
-      if (fs.existsSync(filePath)) {
+      const bridge = globalThis.nwWrldBridge;
+      if (
+        bridge &&
+        bridge.workspace &&
+        typeof bridge.workspace.moduleExists === "function" &&
+        bridge.workspace.moduleExists(name)
+      ) {
         return "A module with this name already exists";
       }
     } catch (err) {
@@ -81,8 +88,8 @@ export const NewModuleDialog = ({ isOpen, onClose, onCreateModule }) => {
       <div className="p-6 flex flex-col gap-4">
         <p className="text-neutral-500 text-[11px] font-mono">
           Once you create a module, you can edit it in your code editor. The
-          module will be saved in the <code>src/projector/modules</code>{" "}
-          directory.
+          module will be saved in{" "}
+          <code>{workspacePath ? `${workspacePath}/modules` : "modules"}</code>.
         </p>
         <div>
           <Label>Module Name</Label>

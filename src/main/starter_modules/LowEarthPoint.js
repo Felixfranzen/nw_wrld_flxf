@@ -1,16 +1,24 @@
-import * as THREE from "three";
-import { FontLoader } from "three/examples/jsm/loaders/FontLoader.js";
-import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
-import BaseThreeJsModule from "../helpers/threeBase.js";
-import _ from "lodash";
-import data from "../../assets/json/low-earth-orbits-objects.json";
+/*
+@nwWrld name: LowEarthPoint
+@nwWrld category: 3D
+@nwWrld imports: BaseThreeJsModule, THREE
+*/
 
-export class LowEarthPointModule extends BaseThreeJsModule {
-  static name = "LowEarthPoint";
-  static category = "3D";
+const sampleN = (arr, n) => {
+  if (!arr || arr.length === 0) return [];
+  const copy = arr.slice();
+  const out = [];
+  const count = Math.max(0, Math.min(copy.length, n));
+  for (let i = 0; i < count; i++) {
+    const idx = Math.floor(Math.random() * copy.length);
+    out.push(copy[idx]);
+    copy.splice(idx, 1);
+  }
+  return out;
+};
 
+class LowEarthPointModule extends BaseThreeJsModule {
   static methods = [
-    ...BaseThreeJsModule.methods,
     {
       name: "primary",
       executeOnLoad: false,
@@ -27,6 +35,7 @@ export class LowEarthPointModule extends BaseThreeJsModule {
 
   constructor(container) {
     super(container);
+    if (!THREE) return;
 
     this.name = LowEarthPointModule.name;
     this.customGroup = new THREE.Group();
@@ -59,17 +68,18 @@ export class LowEarthPointModule extends BaseThreeJsModule {
     const geometry = new THREE.BufferGeometry();
     const material = new THREE.PointsMaterial({
       color: 0xffffff,
-      size: _.random(0.035, 0.065, true),
+      size: 0.05,
     });
     const positions = [];
 
-    data.forEach((item, i) => {
+    const count = 500;
+    for (let i = 0; i < count; i++) {
       const x = Math.random() * 10 - 5;
       const y = Math.random() * 10 - 5;
       const z = Math.random() * 10 - 5;
       positions.push(x, y, z);
       this.points.push(new THREE.Vector3(x, y, z));
-    });
+    }
 
     geometry.setAttribute(
       "position",
@@ -87,19 +97,18 @@ export class LowEarthPointModule extends BaseThreeJsModule {
     const redGeometry = new THREE.BufferGeometry();
     const redMaterial = new THREE.PointsMaterial({
       color: 0xff0000,
-      size: _.random(0.035, 0.065, true),
+      size: 0.045,
     });
     const redPositions = [];
 
-    data.forEach((item, i) => {
-      if (i % 2 === 0) {
-        const x = Math.random() * 10 - 5;
-        const y = Math.random() * 10 - 5;
-        const z = Math.random() * 10 - 5;
-        redPositions.push(x * 0.5, y * 0.5, z * 0.5);
-        this.redPoints.push(new THREE.Vector3(x * 0.5, y * 0.5, z * 0.5));
-      }
-    });
+    const count = 250;
+    for (let i = 0; i < count; i++) {
+      const x = (Math.random() * 10 - 5) * 0.5;
+      const y = (Math.random() * 10 - 5) * 0.5;
+      const z = (Math.random() * 10 - 5) * 0.5;
+      redPositions.push(x, y, z);
+      this.redPoints.push(new THREE.Vector3(x, y, z));
+    }
 
     redGeometry.setAttribute(
       "position",
@@ -132,7 +141,7 @@ export class LowEarthPointModule extends BaseThreeJsModule {
         const material = new THREE.LineBasicMaterial({
           color: 0xffffff,
           linewidth: 1,
-          opacity: _.random(0.01, 0.3, true),
+          opacity: 0.1,
           transparent: true,
         });
         const curveObject = new THREE.Line(geometry, material);
@@ -162,7 +171,7 @@ export class LowEarthPointModule extends BaseThreeJsModule {
         const material = new THREE.LineBasicMaterial({
           color: 0xff0000,
           linewidth: 1,
-          opacity: _.random(0.01, 0.3, true),
+          opacity: 0.15,
           transparent: true,
         });
         const curveObject = new THREE.Line(geometry, material);
@@ -198,24 +207,29 @@ export class LowEarthPointModule extends BaseThreeJsModule {
   primary({ duration } = {}) {
     if (this.destroyed) return;
 
-    const selectedPoints = _.sampleSize(this.points, 5);
-    const loader = new FontLoader();
-    loader.load("../../../assets/json/three-font.json", (font) => {
-      selectedPoints.forEach((point, index) => {
-        const textGeometry = new TextGeometry(
-          `${data[index].Entity} ${data[index].Year}`,
-          { font: font, size: 0.075, height: 0.1 }
-        );
-        const textMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const textMesh = new THREE.Mesh(textGeometry, textMaterial);
-        textMesh.position.copy(point);
-        this.scene.add(textMesh);
+    const seconds = Number(duration) || 0;
+    const millis = seconds > 0 ? seconds * 1000 : 500;
+    const selected = sampleN(this.points, 5);
+    const spheres = [];
 
-        setTimeout(() => {
-          this?.scene?.remove(textMesh);
-        }, duration * 1000 || 500);
-      });
+    selected.forEach((point) => {
+      const geometry = new THREE.SphereGeometry(0.09, 8, 8);
+      const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.copy(point);
+      this.scene.add(mesh);
+      spheres.push(mesh);
     });
+
+    setTimeout(() => {
+      spheres.forEach((mesh) => {
+        this?.scene?.remove(mesh);
+        try {
+          mesh.geometry && mesh.geometry.dispose();
+          mesh.material && mesh.material.dispose();
+        } catch {}
+      });
+    }, millis);
   }
 
   destroy() {

@@ -1,13 +1,16 @@
-import * as THREE from "three";
-import _ from "lodash";
-import BaseThreeJsModule from "../helpers/threeBase.js";
+/*
+@nwWrld name: CubeCube
+@nwWrld category: 3D
+@nwWrld imports: BaseThreeJsModule, THREE
+*/
 
-export class CubeCube extends BaseThreeJsModule {
-  static name = "CubeCube";
-  static category = "3D";
+const sample = (arr) => {
+  if (!arr || !Array.isArray(arr) || arr.length === 0) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+};
 
+class CubeCube extends BaseThreeJsModule {
   static methods = [
-    ...BaseThreeJsModule.methods,
     {
       name: "appendCube",
       executeOnLoad: false,
@@ -193,7 +196,7 @@ export class CubeCube extends BaseThreeJsModule {
   appendCube({ duration } = {}) {
     if (this.destroyed) return;
 
-    const randomCube = _.sample(this.cubeGrid);
+    const randomCube = sample(this.cubeGrid);
     if (randomCube) {
       randomCube.material.color.set(0xff0000);
       randomCube.material.opacity = 0.3;

@@ -1,13 +1,30 @@
-import p5 from "p5";
-import meteorData from "../../assets/json/meteor.json";
-import ModuleBase from "../helpers/moduleBase.js";
+/*
+@nwWrld name: AsteroidGraph
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase, p5, loadJson
+*/
+
+const getSdkMeteorDataset = async () => {
+  try {
+    const data = await loadJson("json/meteor.json");
+    return Array.isArray(data) ? data : null;
+  } catch {
+    return null;
+  }
+};
+
+const makeRandomMeteor = () => {
+  const mass = 10 + Math.random() * 500;
+  const lon = -180 + Math.random() * 360;
+  const lat = -90 + Math.random() * 180;
+  return {
+    mass,
+    geolocation: { coordinates: [lon, lat] },
+  };
+};
 
 class AsteroidGraph extends ModuleBase {
-  static name = "AsteroidGraph";
-  static category = "2D";
-
   static methods = [
-    ...ModuleBase.methods,
     {
       name: "loadMeteors",
       executeOnLoad: true,
@@ -25,11 +42,13 @@ class AsteroidGraph extends ModuleBase {
     super(container);
     this.name = AsteroidGraph.name;
     this.meteors = [];
+    this.dataset = null;
     this.myp5 = null;
     this.init();
   }
 
   init() {
+    if (!p5) return;
     const sketch = (p) => {
       this.myp5 = p;
       let noiseOffsetX = 0.0;
@@ -49,7 +68,7 @@ class AsteroidGraph extends ModuleBase {
       p.draw = () => {
         p.clear();
         const centerY = p.height / 2;
-        let maxDistortion = (p.height / 2) * 0.9; // 90% of half the canvas height
+        let maxDistortion = (p.height / 2) * 0.9;
 
         this.meteors.forEach((meteor, index) => {
           p.stroke(255 - index * 50);
@@ -86,7 +105,9 @@ class AsteroidGraph extends ModuleBase {
           if (meteor.geolocation && meteor.geolocation.coordinates) {
             p.fill(255 - index * 50);
             p.text(
-              `${meteor.geolocation.coordinates[0]}, ${meteor.geolocation.coordinates[1]}`,
+              `${meteor.geolocation.coordinates[0].toFixed(
+                2
+              )}, ${meteor.geolocation.coordinates[1].toFixed(2)}`,
               peakX,
               peakY - 15
             );
@@ -102,14 +123,36 @@ class AsteroidGraph extends ModuleBase {
     this.myp5 = new p5(sketch);
   }
 
-  loadMeteors({ count = 5 } = {}) {
+  async loadMeteors({ count = 5 } = {}) {
+    const safeCount = Math.max(0, Math.min(50, Number(count) || 0));
     this.meteors = [];
-    for (let i = 0; i < count; i++) {
-      if (meteorData.length > 0) {
-        this.meteors.push(
-          meteorData[Math.floor(this.myp5.random(meteorData.length))]
-        );
+    if (!this.dataset) {
+      this.dataset = await getSdkMeteorDataset();
+    }
+
+    if (this.dataset && this.dataset.length > 0 && this.myp5) {
+      for (let i = 0; i < safeCount; i++) {
+        const raw =
+          this.dataset[Math.floor(this.myp5.random(this.dataset.length))];
+        const mass = Number(raw?.mass);
+        const coords = raw?.geolocation?.coordinates;
+        const lon = Number(coords?.[0]);
+        const lat = Number(coords?.[1]);
+        this.meteors.push({
+          mass: Number.isFinite(mass) ? mass : 10 + Math.random() * 500,
+          geolocation: {
+            coordinates: [
+              Number.isFinite(lon) ? lon : -180 + Math.random() * 360,
+              Number.isFinite(lat) ? lat : -90 + Math.random() * 180,
+            ],
+          },
+        });
       }
+      return;
+    }
+
+    for (let i = 0; i < safeCount; i++) {
+      this.meteors.push(makeRandomMeteor());
     }
   }
 

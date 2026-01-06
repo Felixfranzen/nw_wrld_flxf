@@ -1,21 +1,16 @@
-import ModuleBase from "../helpers/moduleBase.js";
+/*
+@nwWrld name: GridDots
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase
+*/
 
 class GridDots extends ModuleBase {
-  static name = "GridDots";
-  static category = "2D";
-
   static methods = [
-    ...ModuleBase.methods,
     {
       name: "size",
       executeOnLoad: true,
       options: [
-        {
-          name: "x",
-          defaultVal: 10,
-          type: "number",
-          allowRandomization: true,
-        },
+        { name: "x", defaultVal: 10, type: "number", allowRandomization: true },
         {
           name: "y",
           defaultVal: 10,
@@ -25,15 +20,9 @@ class GridDots extends ModuleBase {
       ],
     },
     {
-      name: "colour",
+      name: "color",
       executeOnLoad: true,
-      options: [
-        {
-          name: "colour",
-          defaultVal: "#ffffff",
-          type: "color",
-        },
-      ],
+      options: [{ name: "color", defaultVal: "#ffffff", type: "color" }],
     },
   ];
 
@@ -43,7 +32,7 @@ class GridDots extends ModuleBase {
     this.gridElem = null;
     this.x = 10;
     this.y = 10;
-    this.dotColour = "#ffffff";
+    this.dotColor = "#ffffff";
     this.init();
   }
 
@@ -52,6 +41,7 @@ class GridDots extends ModuleBase {
   }
 
   createGridDots() {
+    if (!this.elem) return;
     if (this.gridElem && this.gridElem.parentNode === this.elem) {
       this.elem.removeChild(this.gridElem);
     }
@@ -60,9 +50,9 @@ class GridDots extends ModuleBase {
     this.gridElem.width = this.elem.clientWidth;
     this.gridElem.height = this.elem.clientHeight;
     const ctx = this.gridElem.getContext("2d");
-    this.elem.opacity = 0.5;
+    this.elem.style.opacity = 0.5;
 
-    ctx.fillStyle = this.dotColour;
+    ctx.fillStyle = this.dotColor;
 
     const cellWidth = this.gridElem.width / this.x;
     const cellHeight = this.gridElem.height / this.y;
@@ -81,14 +71,14 @@ class GridDots extends ModuleBase {
     this.elem.appendChild(this.gridElem);
   }
 
-  size({ x = 10, y = 10 }) {
+  size({ x = 10, y = 10 } = {}) {
     this.x = x;
     this.y = y;
     this.createGridDots();
   }
 
-  colour({ colour = "#ffffff" }) {
-    this.dotColour = colour;
+  color({ color = "#ffffff" } = {}) {
+    this.dotColor = color;
     this.createGridDots();
   }
 

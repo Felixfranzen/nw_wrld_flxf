@@ -1,11 +1,20 @@
 # Dependencies
 node_modules/
-package-lock.json
+# package-lock.json
 
 # Build outputs
 dist/
-build/
 out/
+
+# electron-builder "build resources" (we keep only icon assets tracked)
+build/*
+!build/logo.icns
+!build/logo.png
+
+# Packaged app artifacts (generated)
+release/
+*.dmg
+*.dmg.blockmap
 
 # Logs
 logs/

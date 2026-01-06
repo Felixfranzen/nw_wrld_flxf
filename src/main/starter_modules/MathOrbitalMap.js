@@ -1,12 +1,11 @@
-import ModuleBase from "../helpers/moduleBase.js";
-import * as d3 from "d3";
+/*
+@nwWrld name: MathOrbitalMap
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase, d3
+*/
 
 class MathOrbitalMap extends ModuleBase {
-  static name = "MathOrbitalMap";
-  static category = "2D";
-
   static methods = [
-    ...ModuleBase.methods,
     {
       name: "randomize",
       executeOnLoad: false,

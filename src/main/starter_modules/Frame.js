@@ -1,14 +1,22 @@
-import ModuleBase from "../helpers/moduleBase.js";
-import { random } from "lodash";
+/*
+@nwWrld name: Frame
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase
+*/
+
+const randomInt = (min, max) => {
+  const minNum = Number(min);
+  const maxNum = Number(max);
+  if (!Number.isFinite(minNum) || !Number.isFinite(maxNum)) return 0;
+  const lo = Math.min(minNum, maxNum);
+  const hi = Math.max(minNum, maxNum);
+  return Math.floor(Math.random() * (hi - lo + 1)) + lo;
+};
 
 class Frame extends ModuleBase {
-  static name = "Frame";
-  static category = "2D";
-
   static methods = [
-    ...ModuleBase.methods,
     {
-      name: "setPosition",
+      name: "position",
       executeOnLoad: true,
       options: [
         {
@@ -34,7 +42,7 @@ class Frame extends ModuleBase {
       ],
     },
     {
-      name: "randomise",
+      name: "randomize",
       executeOnLoad: false,
     },
   ];
@@ -43,7 +51,7 @@ class Frame extends ModuleBase {
     super(container);
     this.name = Frame.name;
     this.positionOptions = {
-      left: false,
+      left: true,
       right: false,
       top: false,
       bottom: false,
@@ -62,6 +70,7 @@ class Frame extends ModuleBase {
     this.elem.appendChild(this.canvas);
     this.canvas.className = "frame";
 
+    this.updatePosition();
     this.drawFrame();
   }
 
@@ -103,7 +112,7 @@ class Frame extends ModuleBase {
     if (this.positionOptions.bottom) {
       for (let i = 0; i <= numberOfMarkers; i++) {
         let markerPositionX = (width / numberOfMarkers) * i + paddingLeft;
-        let markerLineHeight = random(5, 15);
+        let markerLineHeight = randomInt(5, 15);
 
         this.ctx.beginPath();
         this.ctx.moveTo(markerPositionX, height + paddingTop + lineWidth);
@@ -113,7 +122,7 @@ class Frame extends ModuleBase {
         );
         this.ctx.stroke();
 
-        let number = random(0, 100);
+        let number = randomInt(0, 100);
         let textYPosition =
           height + paddingTop + lineWidth - markerLineHeight - 5;
         this.ctx.fillText(
@@ -123,7 +132,6 @@ class Frame extends ModuleBase {
         );
       }
 
-      // Draw X axis
       this.ctx.beginPath();
       this.ctx.moveTo(paddingLeft, height + paddingTop + lineWidth);
       this.ctx.lineTo(width + paddingLeft, height + paddingTop + lineWidth);
@@ -133,14 +141,14 @@ class Frame extends ModuleBase {
     if (this.positionOptions.top) {
       for (let i = 0; i <= numberOfMarkers; i++) {
         let markerPositionX = (width / numberOfMarkers) * i + paddingLeft;
-        let markerLineHeight = random(5, 15);
+        let markerLineHeight = randomInt(5, 15);
 
         this.ctx.beginPath();
         this.ctx.moveTo(markerPositionX, paddingTop);
         this.ctx.lineTo(markerPositionX, paddingTop - markerLineHeight);
         this.ctx.stroke();
 
-        let number = random(0, 100);
+        let number = randomInt(0, 100);
         let textYPosition = paddingTop + markerLineHeight + fontSize + 5;
         this.ctx.fillText(
           number,
@@ -149,7 +157,6 @@ class Frame extends ModuleBase {
         );
       }
 
-      // Draw X axis
       this.ctx.beginPath();
       this.ctx.moveTo(paddingLeft, paddingTop);
       this.ctx.lineTo(width + paddingLeft, paddingTop);
@@ -159,14 +166,14 @@ class Frame extends ModuleBase {
     if (this.positionOptions.left) {
       for (let i = 0; i <= numberOfMarkers; i++) {
         let markerPositionY = (height / numberOfMarkers) * i + paddingTop;
-        let markerLineWidth = random(5, 15);
+        let markerLineWidth = randomInt(5, 15);
 
         this.ctx.beginPath();
         this.ctx.moveTo(paddingLeft, markerPositionY);
         this.ctx.lineTo(paddingLeft - markerLineWidth, markerPositionY);
         this.ctx.stroke();
 
-        let number = random(0, 100);
+        let number = randomInt(0, 100);
         let textXPosition = paddingLeft - markerLineWidth - fontSize - 5;
         this.ctx.fillText(
           number,
@@ -175,7 +182,6 @@ class Frame extends ModuleBase {
         );
       }
 
-      // Draw Y axis
       this.ctx.beginPath();
       this.ctx.moveTo(paddingLeft, paddingTop);
       this.ctx.lineTo(paddingLeft, height + paddingTop);
@@ -185,14 +191,14 @@ class Frame extends ModuleBase {
     if (this.positionOptions.right) {
       for (let i = 0; i <= numberOfMarkers; i++) {
         let markerPositionY = (height / numberOfMarkers) * i + paddingTop;
-        let markerLineWidth = random(5, 15);
+        let markerLineWidth = randomInt(5, 15);
 
         this.ctx.beginPath();
         this.ctx.moveTo(width + paddingLeft, markerPositionY);
         this.ctx.lineTo(width + paddingLeft + markerLineWidth, markerPositionY);
         this.ctx.stroke();
 
-        let number = random(0, 100);
+        let number = randomInt(0, 100);
         let textXPosition = width + paddingLeft + markerLineWidth + 5;
         this.ctx.fillText(
           number,
@@ -201,7 +207,6 @@ class Frame extends ModuleBase {
         );
       }
 
-      // Draw Y axis
       this.ctx.beginPath();
       this.ctx.moveTo(width + paddingLeft, paddingTop);
       this.ctx.lineTo(width + paddingLeft, height + paddingTop);
@@ -211,15 +216,14 @@ class Frame extends ModuleBase {
     this.ctx.restore();
   }
 
-  setPosition({
-    left = false,
-    right = false,
-    top = false,
-    bottom = false,
-  } = {}) {
+  position({ left = true, right = false, top = false, bottom = false } = {}) {
     this.positionOptions = { left, right, top, bottom };
     this.updatePosition();
-    this.randomise();
+    this.randomize();
+  }
+
+  setPosition(options = {}) {
+    return this.position(options);
   }
 
   updatePosition() {
@@ -233,9 +237,13 @@ class Frame extends ModuleBase {
     Object.assign(this.canvas.style, styles);
   }
 
-  randomise() {
+  randomize() {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.drawFrame();
+  }
+
+  randomise(options = {}) {
+    return this.randomize(options);
   }
 
   destroy() {

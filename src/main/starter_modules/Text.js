@@ -1,31 +1,21 @@
-import ModuleBase from "../helpers/moduleBase.js";
+/*
+@nwWrld name: Text
+@nwWrld category: Text
+@nwWrld imports: ModuleBase
+*/
 
 class Text extends ModuleBase {
-  static name = "Text";
-  static category = "Text";
-
   static methods = [
-    ...ModuleBase.methods,
     {
       name: "text",
       executeOnLoad: true,
-      options: [
-        {
-          name: "text",
-          defaultVal: "Hello, world.",
-          type: "text",
-        },
-      ],
+      options: [{ name: "text", defaultVal: "Hello, world.", type: "text" }],
     },
     {
       name: "randomText",
       executeOnLoad: false,
       options: [
-        {
-          name: "length",
-          defaultVal: 8,
-          type: "number",
-        },
+        { name: "length", defaultVal: 8, type: "number" },
         {
           name: "characters",
           defaultVal:
@@ -49,29 +39,13 @@ class Text extends ModuleBase {
     {
       name: "color",
       executeOnLoad: true,
-      options: [
-        {
-          name: "color",
-          defaultVal: "#ffffff",
-          type: "color",
-        },
-      ],
+      options: [{ name: "color", defaultVal: "#ffffff", type: "color" }],
     },
-    {
-      name: "reset",
-      executeOnLoad: false,
-      options: [],
-    },
+    { name: "reset", executeOnLoad: false, options: [] },
     {
       name: "size",
       executeOnLoad: true,
-      options: [
-        {
-          name: "percentage",
-          defaultVal: 100,
-          type: "number",
-        },
-      ],
+      options: [{ name: "percentage", defaultVal: 100, type: "number" }],
     },
   ];
 
@@ -83,27 +57,28 @@ class Text extends ModuleBase {
   }
 
   init() {
+    if (!this.elem) return;
     const html = `<div style="
         position: absolute;
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
         font-size: 100%;
-        color: #000000;
+        color: #ffffff;
         text-align: center;
-      ">Sample Text</div>`;
+      ">Hello, world.</div>`;
 
     this.elem.insertAdjacentHTML("beforeend", html);
     this.textElem = this.elem.querySelector("div");
   }
 
-  text({ text = "Hello, world" }) {
+  text({ text = "Hello, world." } = {}) {
     if (this.textElem) {
-      this.textElem.textContent = text;
+      this.textElem.textContent = String(text);
     }
   }
 
-  color({ color = "#ffffff" }) {
+  color({ color = "#ffffff" } = {}) {
     if (this.textElem) {
       const isValidHex = /^#([0-9A-F]{3}){1,2}$/i.test(color);
       if (isValidHex) {
@@ -114,20 +89,10 @@ class Text extends ModuleBase {
     }
   }
 
-  randomBinary({ length = 8 }) {
-    if (this.textElem) {
-      let binary = "";
-      for (let i = 0; i < length; i++) {
-        binary += Math.round(Math.random()).toString();
-      }
-      this.textElem.textContent = binary;
-    }
-  }
-
   randomText({
     length = 8,
     characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
-  }) {
+  } = {}) {
     if (this.textElem) {
       let randomText = "";
       for (let i = 0; i < length; i++) {
@@ -139,7 +104,7 @@ class Text extends ModuleBase {
     }
   }
 
-  font({ font = "font-monospace" }) {
+  font({ font = "font-monospace" } = {}) {
     if (this.textElem) {
       this.textElem.className = font;
     }
@@ -151,7 +116,7 @@ class Text extends ModuleBase {
     }
   }
 
-  size({ percentage = 100 }) {
+  size({ percentage = 100 } = {}) {
     if (this.textElem) {
       this.textElem.style.fontSize = `${percentage}%`;
     }

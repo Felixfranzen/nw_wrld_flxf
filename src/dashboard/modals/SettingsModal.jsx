@@ -67,6 +67,8 @@ export const SettingsModal = ({
   onOpenMappings,
   config,
   updateConfig,
+  workspacePath,
+  onSelectWorkspace,
 }) => {
   return (
     <Modal isOpen={isOpen} onClose={onClose}>
@@ -143,27 +145,45 @@ export const SettingsModal = ({
                     <div className="opacity-50 mb-1 text-[11px]">
                       MIDI Device:
                     </div>
-                    <Select
-                      id="midiDevice"
-                      value={inputConfig.deviceName}
-                      onChange={(e) =>
-                        setInputConfig({
-                          ...inputConfig,
-                          deviceName: e.target.value,
-                        })
-                      }
-                      className="py-1 w-full"
-                    >
-                      {availableMidiDevices.map((device) => (
-                        <option
-                          key={device.id}
-                          value={device.name}
-                          className="bg-[#101010]"
+                    {(() => {
+                      const selectedMidiDeviceId =
+                        inputConfig.deviceId ||
+                        (availableMidiDevices.find(
+                          (d) => d.name === inputConfig.deviceName
+                        )?.id ??
+                          "");
+                      return (
+                        <Select
+                          id="midiDevice"
+                          value={selectedMidiDeviceId}
+                          onChange={(e) => {
+                            const nextDeviceId = e.target.value;
+                            const selected = availableMidiDevices.find(
+                              (d) => d.id === nextDeviceId
+                            );
+                            setInputConfig({
+                              ...inputConfig,
+                              deviceId: nextDeviceId,
+                              deviceName: selected?.name || "",
+                            });
+                          }}
+                          className="py-1 w-full"
                         >
-                          {device.name}
-                        </option>
-                      ))}
-                    </Select>
+                          <option value="" className="bg-[#101010]">
+                            Not configured
+                          </option>
+                          {availableMidiDevices.map((device) => (
+                            <option
+                              key={device.id}
+                              value={device.id}
+                              className="bg-[#101010]"
+                            >
+                              {device.name}
+                            </option>
+                          ))}
+                        </Select>
+                      );
+                    })()}
                   </div>
 
                   <div className="pl-12">
@@ -242,8 +262,21 @@ export const SettingsModal = ({
           setBgColor={setBgColor}
           settings={settings}
         />
+
+        <div className="flex flex-col gap-2 font-mono border-t border-neutral-800 pt-6">
+          <div className="pl-12">
+            <div className="opacity-50 mb-1 text-[11px]">Project Folder:</div>
+            <div className="text-[11px] text-neutral-300/70 break-all">
+              {workspacePath || "Not set"}
+            </div>
+          </div>
+          <div className="pl-12">
+            <Button onClick={onSelectWorkspace} className="w-full">
+              {workspacePath ? "OPEN ANOTHER PROJECT" : "OPEN PROJECT"}
+            </Button>
+          </div>
+        </div>
       </div>
     </Modal>
   );
 };
-

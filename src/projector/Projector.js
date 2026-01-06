@@ -7,78 +7,177 @@ import {
   isEmpty,
   isEqual,
   isFunction,
-  fromPairs,
-  map,
   throttle,
   random,
 } from "lodash";
-import { ipcRenderer } from "electron"; // IPC communication
-import fs from "fs"; // File system module
-import path from "path"; // Path module
+import { loadJsonFileSync } from "../shared/json/jsonFileBase.js";
 import { buildMidiConfig } from "../shared/midi/midiUtils.js";
 import { loadSettingsSync } from "../shared/json/configUtils.js";
 import { getActiveSetTracks, migrateToSets } from "../shared/utils/setUtils.js";
+import { buildMethodOptions } from "../shared/utils/methodOptions.js";
+import { getProjectDir } from "../shared/utils/projectDir.js";
 import logger from "./helpers/logger.js";
+const getBridge = () => globalThis.nwWrldBridge;
 
-// ElementPool for reusing DOM elements
-const ElementPool = {
-  pool: {},
-  template: null,
+const getMessaging = () => getBridge()?.messaging;
 
-  init() {
-    // Create a template element
-    this.template = document.createElement("div");
-    this.template.classList.add("module", "z-index-container");
-  },
+class TrackSandboxHost {
+  constructor(modulesContainer) {
+    this.modulesContainer = modulesContainer;
+    this.token = null;
+    this.disposed = false;
+  }
 
-  getElement(moduleName) {
-    if (!this.pool[moduleName] || this.pool[moduleName].length === 0) {
-      // Clone from template
-      const elem = this.template.cloneNode();
-      elem.classList.add(moduleName);
-      return elem;
-    } else {
-      return this.pool[moduleName].pop();
+  async ensureSandbox() {
+    if (this.disposed) {
+      return { ok: false, reason: "DISPOSED" };
     }
-  },
-
-  releaseElement(elem) {
-    const classList = Array.from(elem.classList);
-    const moduleName = classList.find(
-      (cls) => cls !== "module" && cls !== "z-index-container"
-    );
-    if (moduleName) {
-      if (!this.pool[moduleName]) {
-        this.pool[moduleName] = [];
-      }
-      this.pool[moduleName].push(elem);
+    const bridge = getBridge();
+    const ensure = bridge?.sandbox?.ensure;
+    if (typeof ensure !== "function") {
+      throw new Error(`[Projector] Sandbox bridge is unavailable.`);
     }
-  },
-};
+    const res = await ensure();
+    const token = String(res?.token || "").trim();
+    if (!res || res.ok !== true || !token) {
+      throw new Error(res?.reason || "SANDBOX_ENSURE_FAILED");
+    }
+    this.token = token;
+    return { ok: true, token };
+  }
+
+  async request(type, props) {
+    await this.ensureSandbox();
+    const bridge = getBridge();
+    const req = bridge?.sandbox?.request;
+    if (typeof req !== "function") {
+      return { ok: false, error: "SANDBOX_BRIDGE_UNAVAILABLE" };
+    }
+    return await req(this.token, type, props || {});
+  }
+
+  initTrack({ track, moduleSources, assetsBaseUrl }) {
+    return this.request("initTrack", {
+      track,
+      moduleSources,
+      assetsBaseUrl,
+    });
+  }
+
+  setMatrixForInstance({
+    instanceId,
+    track,
+    moduleSources,
+    assetsBaseUrl,
+    matrixOptions,
+  }) {
+    return this.request("setMatrixForInstance", {
+      instanceId,
+      track,
+      moduleSources,
+      assetsBaseUrl,
+      matrixOptions,
+    });
+  }
+
+  invokeOnInstance(instanceId, methodName, options) {
+    return this.request("invokeOnInstance", {
+      instanceId,
+      methodName,
+      options,
+    });
+  }
+
+  introspectModule(moduleType, sourceText) {
+    return this.request("introspectModule", { moduleType, sourceText });
+  }
+
+  destroyTrack() {
+    return this.request("destroyTrack", {});
+  }
+
+  async destroy() {
+    this.disposed = true;
+    try {
+      await getBridge()?.sandbox?.destroy?.();
+    } catch {}
+    this.token = null;
+  }
+}
 
 const Projector = {
   activeTrack: null,
   activeModules: {},
   activeChannelHandlers: {},
   moduleClassCache: new Map(),
+  workspaceModuleSourceCache: new Map(),
+  methodOptionNoRepeatCache: new Map(),
+  runtimeMatrixOverrides: new Map(),
+  assetsBaseUrl: null,
+  trackSandboxHost: null,
+  trackModuleSources: null,
+  restoreTrackNameAfterPreview: null,
+  workspacePath: null,
+  getAssetsBaseUrlForSandboxToken(token) {
+    const safe = String(token || "").trim();
+    if (!safe) return null;
+    return `nw-assets://app/${encodeURIComponent(safe)}/`;
+  },
+  async loadWorkspaceModuleSource(moduleType) {
+    if (!moduleType) return null;
+
+    const safeModuleType = String(moduleType).trim();
+    if (!safeModuleType) return null;
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(safeModuleType)) {
+      throw new Error(
+        `[Projector] Invalid module type "${safeModuleType}" (expected alphanumeric class/file name, no paths).`
+      );
+    }
+
+    if (!this.workspacePath) {
+      throw new Error(
+        `[Projector] Project directory is not set; cannot load module "${safeModuleType}".`
+      );
+    }
+
+    const bridge = getBridge();
+    if (
+      !bridge ||
+      !bridge.workspace ||
+      typeof bridge.workspace.readModuleWithMeta !== "function"
+    ) {
+      throw new Error(`[Projector] Workspace module bridge is unavailable.`);
+    }
+
+    const info = await bridge.workspace.readModuleWithMeta(safeModuleType);
+    if (!info || typeof info.text !== "string") {
+      throw new Error(
+        `[Projector] Workspace module not found: "${safeModuleType}".`
+      );
+    }
+
+    const mtimeMs = typeof info.mtimeMs === "number" ? info.mtimeMs : 0;
+    const cacheKey = `${safeModuleType}:${mtimeMs}`;
+    if (this.workspaceModuleSourceCache.has(cacheKey)) {
+      return this.workspaceModuleSourceCache.get(cacheKey);
+    }
+
+    const promise = Promise.resolve({
+      moduleId: safeModuleType,
+      text: info.text,
+      mtimeMs,
+    });
+
+    for (const key of this.workspaceModuleSourceCache.keys()) {
+      if (key.startsWith(`${safeModuleType}:`) && key !== cacheKey) {
+        this.workspaceModuleSourceCache.delete(key);
+      }
+    }
+    this.workspaceModuleSourceCache.set(cacheKey, promise);
+    return promise;
+  },
   async loadModuleClass(moduleType) {
-    if (!moduleType) {
-      return null;
-    }
-
-    if (this.moduleClassCache.has(moduleType)) {
-      return this.moduleClassCache.get(moduleType);
-    }
-
-    const loaderPromise = import(`./modules/${moduleType}.js`)
-      .then((module) => module.default)
-      .catch((error) => {
-        this.moduleClassCache.delete(moduleType);
-        throw error;
-      });
-
-    this.moduleClassCache.set(moduleType, loaderPromise);
-    return loaderPromise;
+    return await this.loadWorkspaceModuleSource(moduleType);
   },
   userData: [],
   isDeactivating: false,
@@ -86,26 +185,30 @@ const Projector = {
   pendingTrackName: null,
   pendingReloadData: null,
   previewModuleName: null,
+  previewToken: 0,
   debugOverlayActive: false,
   debugLogQueue: [],
   debugLogTimeout: null,
+  moduleIntrospectionCache: new Map(),
 
   logToMain(message) {
-    ipcRenderer.send("log-to-main", message);
+    const appBridge = globalThis.nwWrldAppBridge;
+    if (!appBridge || typeof appBridge.logToMain !== "function") return;
+    appBridge.logToMain(message);
   },
 
   queueDebugLog(log) {
-    if (!this.debugOverlayActive) return;
+    if (!this.debugOverlayActive || !logger.debugEnabled) return;
 
     this.debugLogQueue.push(log);
     if (!this.debugLogTimeout) {
       this.debugLogTimeout = setTimeout(() => {
         if (this.debugLogQueue.length > 0 && this.debugOverlayActive) {
           const batchedLogs = this.debugLogQueue.join("\n\n");
-          ipcRenderer.send("projector-to-dashboard", {
-            type: "debug-log",
-            log: batchedLogs,
-          });
+          const messaging = getMessaging();
+          if (!messaging || typeof messaging.sendToDashboard !== "function")
+            return;
+          messaging.sendToDashboard("debug-log", { log: batchedLogs });
           this.debugLogQueue = [];
         }
         this.debugLogTimeout = null;
@@ -118,186 +221,290 @@ const Projector = {
     this.settings = loadSettingsSync();
     this.applyConfigSettings();
 
-    ElementPool.init();
+    {
+      const messaging = getMessaging();
+      messaging?.sendToDashboard?.("projector-ready", {});
+    }
 
-    ipcRenderer.send("projector-to-dashboard", {
-      type: "projector-ready",
-      props: {},
-    });
+    {
+      const messaging = getMessaging();
+      messaging?.onWorkspaceModulesChanged?.(() => {
+        this.workspaceModuleSourceCache.clear();
+        this.assetsBaseUrl = null;
+        try {
+          this.trackSandboxHost?.destroy?.();
+        } catch {}
+        this.trackSandboxHost = null;
+        this.trackModuleSources = null;
+      });
+    }
 
     // IPC listener for receiving updated userData from Dashboard
-    ipcRenderer.on("from-dashboard", (event, data) => {
-      try {
-        if (!data || typeof data !== "object") {
-          console.error(
-            "❌ [PROJECTOR-IPC] Invalid IPC message received:",
-            data
-          );
-          return;
-        }
-
-        const { type, props = {} } = data;
-
-        if (!type) {
-          console.error("❌ [PROJECTOR-IPC] Message missing type field:", data);
-          return;
-        }
-
-        if (type === "toggleAspectRatioStyle") {
-          if (!props.name) {
-            console.error(
-              "❌ [PROJECTOR-IPC] toggleAspectRatioStyle missing name"
-            );
-            return;
-          }
-          return this.toggleAspectRatioStyle(props.name);
-        }
-
-        if (type === "setBg") {
-          if (!props.value) {
-            console.error("❌ [PROJECTOR-IPC] setBg missing value");
-            return;
-          }
-          return this.setBg(props.value);
-        }
-
-        if (type === "preview-module") {
-          if (!props.moduleName) {
-            console.error(
-              "❌ [PROJECTOR-IPC] preview-module missing moduleName"
-            );
-            return;
-          }
-          return this.previewModule(props.moduleName, props.moduleData);
-        }
-
-        if (type === "clear-preview") {
-          return this.clearPreview();
-        }
-
-        if (type === "trigger-preview-method") {
-          if (!props.moduleName || !props.methodName) {
-            console.error(
-              "❌ [PROJECTOR-IPC] trigger-preview-method missing moduleName or methodName"
-            );
-            return;
-          }
-          return this.triggerPreviewMethod(
-            props.moduleName,
-            props.methodName,
-            props.options || {}
-          );
-        }
-
-        if (type === "refresh-projector") {
-          return this.refreshPage();
-        }
-
-        if (type === "reload-data") {
-          if (this.isLoadingTrack) {
-            this.pendingReloadData = {
-              setId: props.setId,
-              trackName: props.trackName || this.activeTrack?.name,
-            };
-            return;
-          }
-
-          const currentTrackName = props.trackName || this.activeTrack?.name;
-          this.loadUserData(props.setId);
-          this.applyConfigSettings();
-
-          if (currentTrackName) {
-            const nextTrack = find(this.userData, { name: currentTrackName });
-            if (
-              this.activeTrack &&
-              this.activeTrack.name === currentTrackName &&
-              nextTrack &&
-              isEqual(
-                {
-                  name: this.activeTrack.name,
-                  modules: this.activeTrack.modules,
-                  modulesData: this.activeTrack.modulesData,
-                  channelMappings: this.activeTrack.channelMappings,
-                },
-                {
-                  name: nextTrack.name,
-                  modules: nextTrack.modules,
-                  modulesData: nextTrack.modulesData,
-                  channelMappings: nextTrack.channelMappings,
-                }
-              )
-            ) {
+    {
+      const messaging = getMessaging();
+      if (messaging && typeof messaging.onFromDashboard === "function") {
+        messaging.onFromDashboard((event, data) => {
+          try {
+            if (!data || typeof data !== "object") {
+              console.error(
+                "❌ [PROJECTOR-IPC] Invalid IPC message received:",
+                data
+              );
               return;
             }
-            this.deactivateActiveTrack();
-            return this.handleTrackSelection(currentTrackName);
-          }
-          return;
-        }
 
-        if (type === "set-activate") {
-          this.loadUserData(props.setId);
-          this.deactivateActiveTrack();
-          return;
-        }
+            const { type, props = {} } = data;
 
-        if (type === "track-activate") {
-          if (!props.trackName) {
-            console.error(
-              "❌ [PROJECTOR-IPC] track-activate missing trackName"
-            );
-            return;
-          }
-          return this.handleTrackSelection(props.trackName);
-        }
-
-        if (type === "channel-trigger") {
-          let channelNumber = props.channelNumber;
-
-          if (!channelNumber && props.channelName) {
-            const match = String(props.channelName).match(/^ch(\d+)$/i);
-            channelNumber = match ? match[1] : props.channelName;
-          }
-
-          if (!channelNumber) {
-            console.error(
-              "❌ [PROJECTOR-IPC] channel-trigger missing channelNumber/channelName"
-            );
-            return;
-          }
-
-          console.log("🎵 [PROJECTOR-IPC] Channel trigger:", channelNumber);
-          return this.handleChannelMessage(`/Ableton/${channelNumber}`);
-        }
-
-        if (type === "debug-overlay-visibility") {
-          if (typeof props.isOpen !== "boolean") {
-            console.error(
-              "❌ [PROJECTOR-IPC] debug-overlay-visibility missing isOpen"
-            );
-            return;
-          }
-          this.debugOverlayActive = props.isOpen;
-          if (!props.isOpen) {
-            if (this.debugLogTimeout) {
-              clearTimeout(this.debugLogTimeout);
-              this.debugLogTimeout = null;
+            if (!type) {
+              console.error(
+                "❌ [PROJECTOR-IPC] Message missing type field:",
+                data
+              );
+              return;
             }
-            this.debugLogQueue = [];
+
+            if (type === "module-introspect") {
+              const moduleId = props?.moduleId || null;
+              if (!moduleId) return;
+              this.introspectModule(moduleId).then((result) => {
+                const messaging = getMessaging();
+                messaging?.sendToDashboard?.(
+                  "module-introspect-result",
+                  result
+                );
+              });
+              return;
+            }
+
+            if (type === "toggleAspectRatioStyle") {
+              if (!props.name) {
+                console.error(
+                  "❌ [PROJECTOR-IPC] toggleAspectRatioStyle missing name"
+                );
+                return;
+              }
+              return this.toggleAspectRatioStyle(props.name);
+            }
+
+            if (type === "setBg") {
+              if (!props.value) {
+                console.error("❌ [PROJECTOR-IPC] setBg missing value");
+                return;
+              }
+              return this.setBg(props.value);
+            }
+
+            if (type === "preview-module") {
+              if (!props.moduleName) {
+                console.error(
+                  "❌ [PROJECTOR-IPC] preview-module missing moduleName"
+                );
+                return;
+              }
+              return this.previewModule(props.moduleName, props.moduleData);
+            }
+
+            if (type === "clear-preview") {
+              return this.clearPreview();
+            }
+
+            if (type === "trigger-preview-method") {
+              if (!props.moduleName || !props.methodName) {
+                console.error(
+                  "❌ [PROJECTOR-IPC] trigger-preview-method missing moduleName or methodName"
+                );
+                return;
+              }
+              return this.triggerPreviewMethod(
+                props.moduleName,
+                props.methodName,
+                props.options || {}
+              );
+            }
+
+            if (type === "refresh-projector") {
+              return this.refreshPage();
+            }
+
+            if (type === "reload-data") {
+              if (this.isLoadingTrack) {
+                this.pendingReloadData = {
+                  setId: props.setId,
+                  trackName: props.trackName || this.activeTrack?.name,
+                };
+                return;
+              }
+
+              const currentTrackName =
+                props.trackName || this.activeTrack?.name;
+              this.loadUserData(props.setId);
+              this.applyConfigSettings();
+
+              if (currentTrackName) {
+                const nextTrack = find(this.userData, {
+                  name: currentTrackName,
+                });
+                if (
+                  this.activeTrack &&
+                  this.activeTrack.name === currentTrackName &&
+                  nextTrack &&
+                  isEqual(
+                    {
+                      name: this.activeTrack.name,
+                      modules: this.activeTrack.modules,
+                      modulesData: this.activeTrack.modulesData,
+                      channelMappings: this.activeTrack.channelMappings,
+                    },
+                    {
+                      name: nextTrack.name,
+                      modules: nextTrack.modules,
+                      modulesData: nextTrack.modulesData,
+                      channelMappings: nextTrack.channelMappings,
+                    }
+                  )
+                ) {
+                  return;
+                }
+                this.deactivateActiveTrack();
+                return this.handleTrackSelection(currentTrackName);
+              }
+              return;
+            }
+
+            if (type === "set-activate") {
+              this.loadUserData(props.setId);
+              this.deactivateActiveTrack();
+              return;
+            }
+
+            if (type === "track-activate") {
+              if (!props.trackName) {
+                console.error(
+                  "❌ [PROJECTOR-IPC] track-activate missing trackName"
+                );
+                return;
+              }
+              return this.handleTrackSelection(props.trackName);
+            }
+
+            if (type === "channel-trigger") {
+              let channelNumber = props.channelNumber;
+
+              if (!channelNumber && props.channelName) {
+                const match = String(props.channelName).match(/^ch(\d+)$/i);
+                channelNumber = match ? match[1] : props.channelName;
+              }
+
+              if (!channelNumber) {
+                console.error(
+                  "❌ [PROJECTOR-IPC] channel-trigger missing channelNumber/channelName"
+                );
+                return;
+              }
+
+              console.log("🎵 [PROJECTOR-IPC] Channel trigger:", channelNumber);
+              return this.handleChannelMessage(`/Ableton/${channelNumber}`);
+            }
+
+            if (type === "debug-overlay-visibility") {
+              if (typeof props.isOpen !== "boolean") {
+                console.error(
+                  "❌ [PROJECTOR-IPC] debug-overlay-visibility missing isOpen"
+                );
+                return;
+              }
+              this.debugOverlayActive = props.isOpen;
+              if (!props.isOpen) {
+                if (this.debugLogTimeout) {
+                  clearTimeout(this.debugLogTimeout);
+                  this.debugLogTimeout = null;
+                }
+                this.debugLogQueue = [];
+              }
+              return;
+            }
+          } catch (error) {
+            console.error(
+              "❌ [PROJECTOR-IPC] Error processing IPC message:",
+              error
+            );
+            console.error("❌ [PROJECTOR-IPC] Error stack:", error.stack);
+            console.error(
+              "❌ [PROJECTOR-IPC] Message that caused error:",
+              data
+            );
           }
-          return;
-        }
-      } catch (error) {
-        console.error(
-          "❌ [PROJECTOR-IPC] Error processing IPC message:",
-          error
-        );
-        console.error("❌ [PROJECTOR-IPC] Error stack:", error.stack);
-        console.error("❌ [PROJECTOR-IPC] Message that caused error:", data);
+        });
       }
-    });
+    }
 
     this.initInputListener();
+  },
+
+  async introspectModule(moduleId) {
+    const safeModuleId = String(moduleId || "").trim();
+    if (!safeModuleId) {
+      return { moduleId, ok: false, error: "INVALID_MODULE_ID" };
+    }
+
+    let mtimeMs = null;
+    try {
+      if (this.workspacePath) {
+        const bridge = globalThis.nwWrldBridge;
+        const info =
+          bridge?.workspace &&
+          typeof bridge.workspace.getModuleUrl === "function"
+            ? await bridge.workspace.getModuleUrl(safeModuleId)
+            : null;
+        mtimeMs = typeof info?.mtimeMs === "number" ? info.mtimeMs : null;
+      }
+    } catch {
+      mtimeMs = null;
+    }
+
+    const cacheKey =
+      mtimeMs != null ? `${safeModuleId}:${mtimeMs}` : `${safeModuleId}:na`;
+    if (this.moduleIntrospectionCache.has(cacheKey)) {
+      return this.moduleIntrospectionCache.get(cacheKey);
+    }
+
+    const result = await (async () => {
+      try {
+        const src = await this.loadWorkspaceModuleSource(safeModuleId);
+        if (!this.trackSandboxHost) {
+          this.trackSandboxHost = new TrackSandboxHost(null);
+        }
+        const initRes = await this.trackSandboxHost.introspectModule(
+          src.moduleId,
+          src.text
+        );
+
+        const displayName = initRes?.name || safeModuleId;
+        return {
+          moduleId: safeModuleId,
+          ok: true,
+          name: displayName,
+          category: initRes?.category || "Workspace",
+          methods: Array.isArray(initRes?.methods) ? initRes.methods : [],
+          mtimeMs,
+        };
+      } catch (e) {
+        return {
+          moduleId: safeModuleId,
+          ok: false,
+          error: e?.message || "INTROSPECTION_FAILED",
+          mtimeMs,
+        };
+      }
+    })();
+
+    for (const key of this.moduleIntrospectionCache.keys()) {
+      if (key.startsWith(`${safeModuleId}:`) && key !== cacheKey) {
+        this.moduleIntrospectionCache.delete(key);
+      }
+    }
+    this.moduleIntrospectionCache.set(cacheKey, result);
+    return result;
   },
 
   initInputListener() {
@@ -307,67 +514,88 @@ const Projector = {
       this.inputType
     );
 
-    ipcRenderer.on("input-event", (event, payload) => {
+    const messaging = getMessaging();
+    if (!messaging || typeof messaging.onInputEvent !== "function") return;
+    messaging.onInputEvent((event, payload) => {
       const { type, data } = payload;
+      const debugEnabled = logger.debugEnabled;
 
-      logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-      logger.log(`🎵 [INPUT] Event type: ${type}, source: ${data.source}`);
+      if (debugEnabled) {
+        logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        logger.log(`🎵 [INPUT] Event type: ${type}, source: ${data.source}`);
+      }
 
       let trackName = null;
       const timestamp = data.timestamp || performance.now() / 1000;
 
       switch (type) {
         case "track-selection":
-          logger.log("🎯 [INPUT] Track selection event...");
+          if (debugEnabled) logger.log("🎯 [INPUT] Track selection event...");
 
           if (data.source === "midi") {
             const trackNameFromNote = midiConfig.trackTriggersMap[data.note];
-            logger.log(
-              `🎯 [INPUT] Note ${data.note} maps to track:`,
-              trackNameFromNote
-            );
+            if (debugEnabled) {
+              logger.log(
+                `🎯 [INPUT] Note ${data.note} maps to track:`,
+                trackNameFromNote
+              );
+            }
 
             if (trackNameFromNote) {
-              logger.log(`✅ [INPUT] Activating track: "${trackNameFromNote}"`);
+              if (debugEnabled) {
+                logger.log(
+                  `✅ [INPUT] Activating track: "${trackNameFromNote}"`
+                );
+              }
               trackName = trackNameFromNote;
               this.handleTrackSelection(trackNameFromNote);
             } else {
-              logger.warn(
-                `⚠️ [INPUT] Note ${data.note} not mapped to any track`
-              );
+              if (debugEnabled) {
+                logger.warn(
+                  `⚠️ [INPUT] Note ${data.note} not mapped to any track`
+                );
+              }
             }
           } else if (data.source === "osc") {
             const trackNameFromIdentifier =
               midiConfig.trackTriggersMap[data.identifier];
-            logger.log(
-              `🎯 [INPUT] OSC address ${data.identifier} maps to track:`,
-              trackNameFromIdentifier
-            );
+            if (debugEnabled) {
+              logger.log(
+                `🎯 [INPUT] OSC address ${data.identifier} maps to track:`,
+                trackNameFromIdentifier
+              );
+            }
 
             if (trackNameFromIdentifier) {
-              logger.log(
-                `✅ [INPUT] Activating track: "${trackNameFromIdentifier}"`
-              );
+              if (debugEnabled) {
+                logger.log(
+                  `✅ [INPUT] Activating track: "${trackNameFromIdentifier}"`
+                );
+              }
               trackName = trackNameFromIdentifier;
               this.handleTrackSelection(trackNameFromIdentifier);
             } else {
-              logger.warn(
-                `⚠️ [INPUT] OSC address ${data.identifier} not mapped to any track`
-              );
-              logger.log(
-                "📋 [INPUT] Available OSC mappings:",
-                Object.keys(midiConfig.trackTriggersMap)
-              );
+              if (debugEnabled) {
+                logger.warn(
+                  `⚠️ [INPUT] OSC address ${data.identifier} not mapped to any track`
+                );
+                logger.log(
+                  "📋 [INPUT] Available OSC mappings:",
+                  Object.keys(midiConfig.trackTriggersMap)
+                );
+              }
             }
           }
           break;
 
         case "method-trigger":
-          logger.log("🎯 [INPUT] Method trigger event...");
-          logger.log(
-            "🎯 [INPUT] Current active track:",
-            this.activeTrack?.name
-          );
+          if (debugEnabled) {
+            logger.log("🎯 [INPUT] Method trigger event...");
+            logger.log(
+              "🎯 [INPUT] Current active track:",
+              this.activeTrack?.name
+            );
+          }
 
           let channelNames = [];
           const activeTrackName = this.activeTrack?.name;
@@ -381,10 +609,12 @@ const Projector = {
                 channelNames = Array.isArray(mappedChannels)
                   ? mappedChannels
                   : [mappedChannels];
-                logger.log(
-                  `🎯 [INPUT] Note ${data.note} maps to channels:`,
-                  channelNames
-                );
+                if (debugEnabled) {
+                  logger.log(
+                    `🎯 [INPUT] Note ${data.note} maps to channels:`,
+                    channelNames
+                  );
+                }
               }
             } else if (data.source === "osc") {
               const mappedChannels = trackMappings[data.channelName];
@@ -392,24 +622,30 @@ const Projector = {
                 channelNames = Array.isArray(mappedChannels)
                   ? mappedChannels
                   : [mappedChannels];
-                logger.log(
-                  `🎯 [INPUT] OSC address maps to channels:`,
-                  channelNames
-                );
+                if (debugEnabled) {
+                  logger.log(
+                    `🎯 [INPUT] OSC address maps to channels:`,
+                    channelNames
+                  );
+                }
               }
             }
           } else {
-            logger.warn(
-              `⚠️ [INPUT] No channel mappings for track "${activeTrackName}"`
-            );
+            if (debugEnabled) {
+              logger.warn(
+                `⚠️ [INPUT] No channel mappings for track "${activeTrackName}"`
+              );
+            }
           }
 
           if (channelNames.length > 0 && activeTrackName) {
             trackName = activeTrackName;
             channelNames.forEach((channelName) => {
-              logger.log(
-                `✅ [INPUT] Triggering ${channelName} on track "${activeTrackName}"`
-              );
+              if (debugEnabled) {
+                logger.log(
+                  `✅ [INPUT] Triggering ${channelName} on track "${activeTrackName}"`
+                );
+              }
               this.handleChannelMessage(`/Ableton/${channelName}`, {
                 note: data.note,
                 channel: data.channel,
@@ -420,28 +656,34 @@ const Projector = {
               });
             });
           } else if (channelNames.length === 0) {
-            logger.warn(`⚠️ [INPUT] Event not mapped to any channel`);
+            if (debugEnabled) {
+              logger.warn(`⚠️ [INPUT] Event not mapped to any channel`);
+            }
           } else if (!activeTrackName) {
-            logger.warn(`⚠️ [INPUT] No active track - select a track first`);
+            if (debugEnabled) {
+              logger.warn(`⚠️ [INPUT] No active track - select a track first`);
+            }
           }
           break;
       }
 
-      const timeStr = timestamp.toFixed(5);
-      const source = data.source === "midi" ? "MIDI" : "OSC";
-      let log = `[${timeStr}] ${source} Event\n`;
-      if (data.source === "midi") {
-        log += `  Note: ${data.note}\n`;
-        log += `  Channel: ${data.channel}\n`;
-      } else if (data.source === "osc") {
-        log += `  Address: ${data.address}\n`;
+      if (this.debugOverlayActive && debugEnabled) {
+        const timeStr = timestamp.toFixed(5);
+        const source = data.source === "midi" ? "MIDI" : "OSC";
+        let log = `[${timeStr}] ${source} Event\n`;
+        if (data.source === "midi") {
+          log += `  Note: ${data.note}\n`;
+          log += `  Channel: ${data.channel}\n`;
+        } else if (data.source === "osc") {
+          log += `  Address: ${data.address}\n`;
+        }
+        if (trackName) {
+          log += `  Track: ${trackName}\n`;
+        }
+        this.queueDebugLog(log);
       }
-      if (trackName) {
-        log += `  Track: ${trackName}\n`;
-      }
-      this.queueDebugLog(log);
 
-      logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      if (debugEnabled) logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     });
   },
 
@@ -456,78 +698,36 @@ const Projector = {
   },
 
   loadUserData(activeSetIdOverride = null) {
-    const srcDir = path.join(__dirname, "..", "..");
-    const userDataPath = path.join(srcDir, "shared", "json", "userData.json");
-    const appStatePath = path.join(srcDir, "shared", "json", "appState.json");
-    console.log("🔍 [Projector] __dirname:", __dirname);
-    console.log("🔍 [Projector] userDataPath:", userDataPath);
-    console.log("🔍 [Projector] appStatePath:", appStatePath);
-    try {
-      const data = fs.readFileSync(userDataPath, "utf-8");
-      const parsedData = JSON.parse(data);
-      const migratedData = migrateToSets(parsedData);
+    const parsedData = loadJsonFileSync(
+      "userData.json",
+      { config: {}, sets: [] },
+      "Could not load userData.json, initializing with empty data."
+    );
+    const migratedData = migrateToSets(parsedData);
 
-      let activeSetId = null;
-      if (activeSetIdOverride) {
-        activeSetId = activeSetIdOverride;
-        console.log("🔍 [Projector] Using activeSetId override:", activeSetId);
-      } else {
-        try {
-          const appStateData = fs.readFileSync(appStatePath, "utf-8");
-          const appState = JSON.parse(appStateData);
-          activeSetId = appState.activeSetId;
-          console.log(
-            "🔍 [Projector] Loaded activeSetId from appState:",
-            activeSetId
-          );
-        } catch (appStateErr) {
-          console.warn(
-            "⚠️ [Projector] Could not load appState.json, falling back to default set"
-          );
-          activeSetId = null;
-        }
-      }
+    let activeSetId = null;
+    if (activeSetIdOverride) {
+      activeSetId = activeSetIdOverride;
+    } else {
+      const appState = loadJsonFileSync(
+        "appState.json",
+        { activeSetId: null, workspacePath: null },
+        "Could not load appState.json, initializing with defaults."
+      );
+      activeSetId = appState?.activeSetId || null;
+      const projectDir = getProjectDir();
+      this.workspacePath = projectDir || appState?.workspacePath || null;
+    }
 
-      this.userData = getActiveSetTracks(migratedData, activeSetId);
-      this.config = migratedData.config || {};
-      this.inputType = migratedData.config?.input?.type || "midi";
+    this.userData = getActiveSetTracks(migratedData, activeSetId);
+    this.config = migratedData.config || {};
+    this.inputType = migratedData.config?.input?.type || "midi";
+    if (logger.debugEnabled) {
       console.log(
         `✅ [Projector] Loaded ${this.userData.length} tracks from set: ${
           activeSetId || "default"
         }`
       );
-    } catch (err) {
-      console.error("Error loading userData.json, trying backup...", err);
-
-      try {
-        const backupPath = `${userDataPath}.backup`;
-        const backupData = fs.readFileSync(backupPath, "utf-8");
-        const parsedData = JSON.parse(backupData);
-        const migratedData = migrateToSets(parsedData);
-
-        let activeSetId = null;
-        if (activeSetIdOverride) {
-          activeSetId = activeSetIdOverride;
-        } else {
-          try {
-            const appStateData = fs.readFileSync(appStatePath, "utf-8");
-            const appState = JSON.parse(appStateData);
-            activeSetId = appState.activeSetId;
-          } catch (appStateErr) {
-            activeSetId = null;
-          }
-        }
-
-        this.userData = getActiveSetTracks(migratedData, activeSetId);
-        this.config = migratedData.config || {};
-        this.inputType = migratedData.config?.input?.type || "midi";
-        console.warn(`Restored from backup: ${this.userData.length} tracks`);
-      } catch (backupErr) {
-        console.error("Backup also failed, using empty state:", backupErr);
-        this.userData = [];
-        this.config = {};
-        this.inputType = "midi";
-      }
     }
   },
 
@@ -546,11 +746,10 @@ const Projector = {
       return;
     }
 
-    // Immediately hide all modules visually without requiring GPU work
-    const allModules = modulesContainer.querySelectorAll(".module");
-    forEach(allModules, (module) => {
-      module.style.visibility = "hidden";
-    });
+    try {
+      this.trackSandboxHost?.destroy?.();
+    } catch {}
+    this.trackSandboxHost = null;
 
     forEach(this.activeModules, (instances, instanceId) => {
       forEach(instances, (instance) => {
@@ -567,38 +766,45 @@ const Projector = {
       });
     });
 
-    // Remove all module elements from the DOM
-    const moduleElems = modulesContainer.querySelectorAll(".module");
-    forEach(moduleElems, (moduleElem) => {
-      modulesContainer.removeChild(moduleElem);
-      ElementPool.releaseElement(moduleElem);
-    });
+    try {
+      modulesContainer.textContent = "";
+    } catch {}
 
     this.activeModules = {};
     this.activeTrack = null;
     this.activeChannelHandlers = {};
+    try {
+      this.runtimeMatrixOverrides = new Map();
+    } catch {}
     this.isDeactivating = false;
   },
 
   async handleTrackSelection(trackName) {
-    logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    logger.log("📦 [TRACK] handleTrackSelection called with:", trackName);
-    logger.log("📦 [TRACK] Current userData:", this.userData);
-    logger.log("📦 [TRACK] Looking for track with name:", trackName);
+    const debugEnabled = logger.debugEnabled;
+    if (debugEnabled) {
+      logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      logger.log("📦 [TRACK] handleTrackSelection called with:", trackName);
+      logger.log("📦 [TRACK] Current userData:", this.userData);
+      logger.log("📦 [TRACK] Looking for track with name:", trackName);
+    }
 
     // If already loading, store this as pending and return
     if (this.isLoadingTrack) {
       // If requesting the same track that's loading, ignore
       if (this.activeTrack?.name === trackName) {
-        logger.log(
-          "⚠️ [TRACK] Already loading this track, ignoring duplicate request"
-        );
+        if (debugEnabled) {
+          logger.log(
+            "⚠️ [TRACK] Already loading this track, ignoring duplicate request"
+          );
+        }
         return;
       }
       // Store the new track as pending (latest request wins)
-      logger.log(
-        `⚠️ [TRACK] Track load in progress, queueing "${trackName}" as pending`
-      );
+      if (debugEnabled) {
+        logger.log(
+          `⚠️ [TRACK] Track load in progress, queueing "${trackName}" as pending`
+        );
+      }
       this.pendingTrackName = trackName;
       return;
     }
@@ -607,37 +813,43 @@ const Projector = {
     this.isLoadingTrack = true;
 
     const track = find(this.userData, { name: trackName });
-    logger.log("📦 [TRACK] Track found:", track);
+    if (debugEnabled) logger.log("📦 [TRACK] Track found:", track);
 
     if (!track) {
       logger.error(`❌ [TRACK] Track "${trackName}" not found in userData`);
-      logger.log(
-        "📦 [TRACK] Available tracks:",
-        this.userData.map((t) => t.name)
-      );
+      if (debugEnabled) {
+        logger.log(
+          "📦 [TRACK] Available tracks:",
+          this.userData.map((t) => t.name)
+        );
+      }
       this.deactivateActiveTrack();
       this.isLoadingTrack = false;
       return;
     }
 
-    logger.log("📦 [TRACK] Current activeTrack:", this.activeTrack);
+    if (debugEnabled)
+      logger.log("📦 [TRACK] Current activeTrack:", this.activeTrack);
 
     if (this.activeTrack && this.activeTrack.name !== trackName) {
-      logger.log(
-        "📦 [TRACK] Deactivating previous track:",
-        this.activeTrack.name
-      );
+      if (debugEnabled) {
+        logger.log(
+          "📦 [TRACK] Deactivating previous track:",
+          this.activeTrack.name
+        );
+      }
       this.deactivateActiveTrack();
     }
 
     if (this.activeTrack?.name === trackName) {
-      logger.log("⚠️ [TRACK] Track already active, skipping");
+      if (debugEnabled) logger.log("⚠️ [TRACK] Track already active, skipping");
       this.isLoadingTrack = false;
       return;
     }
 
     const modulesContainer = document.querySelector(".modules");
-    logger.log("📦 [TRACK] Modules container:", modulesContainer);
+    if (debugEnabled)
+      logger.log("📦 [TRACK] Modules container:", modulesContainer);
 
     if (!modulesContainer) {
       logger.error("❌ [TRACK] No .modules container found in DOM!");
@@ -645,69 +857,81 @@ const Projector = {
       return;
     }
 
-    logger.log("📦 [TRACK] Track modules to load:", track.modules);
+    if (debugEnabled)
+      logger.log("📦 [TRACK] Track modules to load:", track.modules);
 
     if (!Array.isArray(track.modules)) {
       logger.error(
         `❌ [TRACK] Track "${trackName}" has invalid modules array:`,
         track.modules
       );
-      logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      if (debugEnabled) logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
       this.isLoadingTrack = false;
       return;
     }
 
     try {
-      // Ensure activeTrack is set before executing constructor methods (matrix needs module type)
       this.activeTrack = track;
       this.activeChannelHandlers = this.buildChannelHandlerMap(track);
 
-      // Collect all initialization promises
-      const moduleInitPromises = track.modules.map(
-        async (moduleInstance, index) => {
-          const { id: instanceId, type: moduleType } = moduleInstance;
-          logger.log(
-            `🔧 [MODULE] Loading module ${index + 1}/${
-              track.modules.length
-            }: ${moduleType} (${instanceId})`
-          );
-          let ModuleClass;
-          try {
-            ModuleClass = await this.loadModuleClass(moduleType);
-            logger.log(`Module loaded: ${moduleType} (${instanceId})`);
-          } catch (error) {
-            logger.error(`Error loading module "${moduleType}":`, error);
-            return;
-          }
+      const moduleSources = {};
+      const seenTypes = new Set();
+      for (const m of track.modules) {
+        const t = String(m?.type || "").trim();
+        if (!t || seenTypes.has(t)) continue;
+        seenTypes.add(t);
+        const src = await this.loadWorkspaceModuleSource(t);
+        moduleSources[t] = { text: src?.text || "" };
+      }
+      this.trackModuleSources = moduleSources;
 
-          const constructorMethods = get(track.modulesData, [
-            instanceId,
-            "constructor",
-          ]);
+      if (!this.trackSandboxHost) {
+        this.trackSandboxHost = new TrackSandboxHost(modulesContainer);
+      }
 
-          // Initialize an empty array for module instances
-          this.activeModules[instanceId] = [];
-
-          // Execute constructor methods (including "matrix") synchronously in the init chain
-          if (constructorMethods && constructorMethods.length > 0) {
-            await this.executeMethods(
-              constructorMethods,
-              instanceId,
-              this.activeModules[instanceId],
-              true
-            );
-          }
-        }
+      await this.trackSandboxHost.ensureSandbox();
+      const assetsBaseUrl = this.getAssetsBaseUrlForSandboxToken(
+        this.trackSandboxHost.token
       );
+      if (!assetsBaseUrl) {
+        throw new Error("ASSETS_BASE_URL_UNAVAILABLE");
+      }
 
-      // Wait for all module initializations to complete
-      logger.log("⏳ [TRACK] Waiting for all modules to initialize...");
-      await Promise.all(moduleInitPromises);
-      logger.log("✅ [TRACK] All modules initialized");
+      if (debugEnabled)
+        logger.log("⏳ [TRACK] Waiting for sandbox track init...");
+      const res = await this.trackSandboxHost.initTrack({
+        track,
+        moduleSources,
+        assetsBaseUrl,
+      });
+      if (!res || res.ok !== true) {
+        throw new Error(res?.error || "SANDBOX_TRACK_INIT_FAILED");
+      }
 
-      logger.log(`✅✅✅ [TRACK] Track activated successfully: "${trackName}"`);
-      logger.log("📦 [TRACK] Active modules:", Object.keys(this.activeModules));
-      logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      this.activeModules = {};
+      for (const m of track.modules) {
+        const instanceId = String(m?.id || "").trim();
+        if (!instanceId) continue;
+        this.activeModules[instanceId] = [{}];
+      }
+      if (debugEnabled) logger.log("✅ [TRACK] Sandbox track initialized");
+
+      if (debugEnabled) {
+        logger.log(
+          `✅✅✅ [TRACK] Track activated successfully: "${trackName}"`
+        );
+        logger.log(
+          "📦 [TRACK] Active modules:",
+          Object.keys(this.activeModules)
+        );
+        logger.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      }
+    } catch (error) {
+      logger.error(
+        `❌ [TRACK] Failed to activate track "${trackName}":`,
+        error
+      );
+      this.deactivateActiveTrack();
     } finally {
       this.isLoadingTrack = false;
     }
@@ -716,7 +940,8 @@ const Projector = {
     if (this.pendingTrackName) {
       const nextTrack = this.pendingTrackName;
       this.pendingTrackName = null;
-      logger.log(`🔄 [TRACK] Loading pending track: "${nextTrack}"`);
+      if (debugEnabled)
+        logger.log(`🔄 [TRACK] Loading pending track: "${nextTrack}"`);
       this.handleTrackSelection(nextTrack);
       return;
     }
@@ -757,10 +982,10 @@ const Projector = {
     }
 
     // Only send ready when no pending track
-    ipcRenderer.send("projector-to-dashboard", {
-      type: "projector-ready",
-      props: {},
-    });
+    {
+      const messaging = getMessaging();
+      messaging?.sendToDashboard?.("projector-ready", {});
+    }
     logger.log("✅ [PROJECTOR-IPC] Sent projector-ready signal to dashboard");
   },
 
@@ -768,7 +993,9 @@ const Projector = {
     if (!this.activeTrack) return;
 
     if (this.isLoadingTrack) {
-      logger.warn(`Ignoring channel trigger during track initialization`);
+      if (logger.debugEnabled) {
+        logger.warn(`Ignoring channel trigger during track initialization`);
+      }
       return;
     }
 
@@ -777,45 +1004,103 @@ const Projector = {
 
     if (channelMatch && channelMatch[1]) {
       const channelNumber = channelMatch[1];
-      logger.log(`Received message for channel: ${channelNumber}`);
+      if (logger.debugEnabled) {
+        logger.log(`Received message for channel: ${channelNumber}`);
+      }
       const { modulesData } = track;
       if (!this.activeChannelHandlers[channelNumber]) {
         this.activeChannelHandlers = this.buildChannelHandlerMap(track);
       }
       const channelTargets = this.activeChannelHandlers[channelNumber] || [];
       if (channelTargets.length === 0) {
-        logger.warn(`No modules mapped to channel ${channelNumber}`);
+        if (logger.debugEnabled) {
+          logger.warn(`No modules mapped to channel ${channelNumber}`);
+        }
         return;
       }
 
-      await Promise.all(
-        channelTargets.map(async ({ instanceId, moduleType }) => {
+      const matrixOverridesForChannel = new Map(); // instanceId -> matrixOptions
+      const nonMatrixByInstance = new Map(); // instanceId -> { moduleType, methods }
+
+      for (const { instanceId, moduleType } of channelTargets) {
+        if (this.debugOverlayActive && logger.debugEnabled) {
           Projector.logToMain(
             `instanceId: ${instanceId}, moduleType: ${moduleType}`
           );
+        }
 
-          const moduleData = get(modulesData, instanceId);
-          if (!moduleData) return;
+        const moduleData = get(modulesData, instanceId);
+        if (!moduleData) continue;
 
-          const methods = get(moduleData.methods, channelNumber);
-          if (!methods) return;
+        const methods = get(moduleData.methods, channelNumber);
+        if (!Array.isArray(methods) || methods.length === 0) continue;
 
-          const moduleInstances = this.activeModules[instanceId] || [];
-          await this.executeMethods(
-            methods,
-            instanceId,
-            moduleInstances,
-            false,
-            {
-              ...debugContext,
-              moduleInfo: { instanceId, type: moduleType },
-              trackName: this.activeTrack.name,
-            }
+        const matrixMethod = methods.find((m) => m?.name === "matrix") || null;
+        if (matrixMethod) {
+          matrixOverridesForChannel.set(instanceId, matrixMethod.options);
+        }
+        const nonMatrix = methods.filter((m) => m?.name && m.name !== "matrix");
+        if (nonMatrix.length) {
+          nonMatrixByInstance.set(instanceId, {
+            moduleType,
+            methods: nonMatrix,
+          });
+        }
+      }
+
+      if (matrixOverridesForChannel.size > 0 && this.trackSandboxHost) {
+        try {
+          for (const [id, opts] of matrixOverridesForChannel.entries()) {
+            this.runtimeMatrixOverrides.set(id, opts);
+          }
+        } catch {}
+
+        const assetsBaseUrl = this.getAssetsBaseUrlForSandboxToken(
+          this.trackSandboxHost?.token
+        );
+        const moduleSources = this.trackModuleSources || {};
+        if (assetsBaseUrl) {
+          await Promise.all(
+            Array.from(matrixOverridesForChannel.entries()).map(
+              async ([instanceId, matrixOptions]) => {
+                const res = await this.trackSandboxHost.setMatrixForInstance({
+                  instanceId,
+                  track: this.activeTrack,
+                  moduleSources,
+                  assetsBaseUrl,
+                  matrixOptions,
+                });
+                if (!res || res.ok !== true) {
+                  throw new Error(res?.error || "SANDBOX_SET_MATRIX_FAILED");
+                }
+              }
+            )
           );
-        })
+        }
+      }
+
+      await Promise.all(
+        Array.from(nonMatrixByInstance.entries()).map(
+          async ([instanceId, entry]) => {
+            const moduleInstances = this.activeModules[instanceId] || [];
+            await this.executeMethods(
+              entry.methods,
+              instanceId,
+              moduleInstances,
+              false,
+              {
+                ...debugContext,
+                moduleInfo: { instanceId, type: entry.moduleType },
+                trackName: this.activeTrack.name,
+              }
+            );
+          }
+        )
       );
     } else {
-      logger.warn(`Invalid channel path received: ${channelPath}`);
+      if (logger.debugEnabled) {
+        logger.warn(`Invalid channel path received: ${channelPath}`);
+      }
     }
   },
 
@@ -848,16 +1133,19 @@ const Projector = {
     isConstructor = false,
     debugContext = {}
   ) {
-    logger.log(`⏱️ executeMethods start: ${instanceId}`);
+    const debugEnabled = logger.debugEnabled;
+    const overlayDebug = debugEnabled && this.debugOverlayActive;
 
-    Projector.logToMain(`${performance.now()}`);
-    Projector.logToMain(`executeMethods: ${instanceId}`);
+    if (debugEnabled) logger.log(`⏱️ executeMethods start: ${instanceId}`);
+
+    if (overlayDebug) {
+      Projector.logToMain(`${performance.now()}`);
+      Projector.logToMain(`executeMethods: ${instanceId}`);
+    }
 
     let needsMatrixUpdate = false;
     let matrixOptions = null;
     let otherMethods = [];
-
-    // Separate "matrix" method from others
     forEach(methods, (method) => {
       if (method.name === "matrix") {
         needsMatrixUpdate = true;
@@ -867,261 +1155,109 @@ const Projector = {
       }
     });
 
-    // Handle "matrix" method if present
-    if (needsMatrixUpdate) {
-      logger.log(`⏱️ Matrix update start: ${instanceId}`);
-      await this.updateMatrix(instanceId, matrixOptions);
-      logger.log(`⏱️ Matrix update end: ${instanceId}`);
-
-      // Update moduleInstances with the newly created instances
-      moduleInstances = this.activeModules[instanceId];
+    if (needsMatrixUpdate && this.trackSandboxHost && this.activeTrack) {
+      const assetsBaseUrl = this.getAssetsBaseUrlForSandboxToken(
+        this.trackSandboxHost?.token
+      );
+      const moduleSources = this.trackModuleSources || {};
+      if (assetsBaseUrl) {
+        const res = await this.trackSandboxHost.setMatrixForInstance({
+          instanceId,
+          track: this.activeTrack,
+          moduleSources,
+          assetsBaseUrl,
+          matrixOptions,
+        });
+        if (!res || res.ok !== true) {
+          throw new Error(res?.error || "SANDBOX_SET_MATRIX_FAILED");
+        }
+      }
     }
 
-    // Execute other methods in parallel
-    logger.log(`⏱️ Other methods execution start: ${instanceId}`);
+    if (debugEnabled)
+      logger.log(`⏱️ Other methods execution start: ${instanceId}`);
     await Promise.all(
       otherMethods.map(async ({ name: methodName, options: methodOptions }) => {
-        const options = fromPairs(
-          map(methodOptions, ({ name, value, randomRange }) => {
-            if (
-              randomRange &&
-              Array.isArray(randomRange) &&
-              randomRange.length === 2
-            ) {
-              let [min, max] = randomRange;
-
-              if (typeof min !== "number" || typeof max !== "number") {
-                console.warn(
-                  `[Projector] Invalid randomRange for "${name}": [${min}, ${max}] - expected numbers. Using value: ${value}`
-                );
-                return [name, value];
-              }
-
-              if (min > max) {
-                console.warn(
-                  `[Projector] Invalid randomRange for "${name}": min (${min}) > max (${max}). Swapping values.`
-                );
-                [min, max] = [max, min];
-              }
-
-              const randomValue =
-                Number.isInteger(min) && Number.isInteger(max)
-                  ? Math.floor(Math.random() * (max - min + 1)) + min
-                  : Math.random() * (max - min) + min;
-
-              return [name, randomValue];
-            }
-            return [name, value];
-          })
-        );
-
-        const timestamp = (
-          debugContext.timestamp || performance.now() / 1000
-        ).toFixed(5);
-        let log = `[${timestamp}] Method Execution\n`;
-        if (debugContext.trackName) {
-          log += `  Track: ${debugContext.trackName}\n`;
-        }
-        if (debugContext.moduleInfo) {
-          log += `  Module: ${debugContext.moduleInfo.instanceId} (${debugContext.moduleInfo.type})\n`;
-        }
-        log += `  Method: ${methodName}\n`;
-        if (options && Object.keys(options).length > 0) {
-          log += `  Props: ${JSON.stringify(options, null, 2)}\n`;
-        }
-        this.queueDebugLog(log);
-
-        await Promise.all(
-          moduleInstances.map(async (instance) => {
-            logger.log(`⏱️ Method start: ${methodName} for ${instanceId}`);
-            Projector.logToMain(
-              `${JSON.stringify(options)} [${performance.now()}]`
-            );
-
-            if (isFunction(instance[methodName])) {
-              await instance[methodName](options);
-              if (isConstructor) {
-                logger.log(
-                  `Executed constructor method "${methodName}" on module "${instanceId}".`
-                );
-              } else {
-                logger.log(
-                  `Executed method "${methodName}" with options ${JSON.stringify(
-                    options
-                  )} on module "${instanceId}".`
-                );
-              }
-            } else {
-              logger.warn(
-                `Method "${methodName}" does not exist on module "${instanceId}".`
+        const options = buildMethodOptions(methodOptions, {
+          onInvalidRandomRange: ({ name, min, max, value }) => {
+            if (debugEnabled) {
+              console.warn(
+                `[Projector] Invalid randomRange for "${name}": [${min}, ${max}] - expected numbers. Using value: ${value}`
               );
             }
-            logger.log(`⏱️ Method end: ${methodName} for ${instanceId}`);
-          })
-        );
-      })
-    );
-    logger.log(`⏱️ Other methods execution end: ${instanceId}`);
-    logger.log(`⏱️ executeMethods end: ${instanceId}`);
-  },
+          },
+          onSwapRandomRange: ({ name, min, max }) => {
+            if (debugEnabled) {
+              console.warn(
+                `[Projector] Invalid randomRange for "${name}": min (${min}) > max (${max}). Swapping values.`
+              );
+            }
+          },
+          noRepeatCache: this.methodOptionNoRepeatCache,
+          noRepeatKeyPrefix: `${instanceId}:${methodName}`,
+        });
 
-  async updateMatrix(instanceId, methodOptions) {
-    logger.log(`⏱️ updateMatrix start: ${instanceId}`);
-    const options = fromPairs(
-      map(methodOptions, ({ name, value }) => [name, value])
-    );
-
-    let matrixOptions = { rows: 1, cols: 1, excludedCells: [], border: false };
-    const m = options.matrix;
-
-    if (Array.isArray(m)) {
-      matrixOptions = {
-        rows: m[0] || 1,
-        cols: m[1] || 1,
-        excludedCells: [],
-        border: options.border,
-      };
-    } else if (m && typeof m === "object") {
-      matrixOptions = {
-        rows: m.rows || 1,
-        cols: m.cols || 1,
-        excludedCells: m.excludedCells || [],
-        border: options.border,
-      };
-    }
-
-    const { rows, cols, excludedCells } = matrixOptions;
-
-    const modulesContainer = document.querySelector(".modules");
-    if (!modulesContainer) return;
-
-    // Find the module instance to get its type
-    // For preview mode (no activeTrack), strip the "preview_" prefix from instanceId
-    const moduleInstance = this.activeTrack
-      ? this.activeTrack.modules.find((m) => m.id === instanceId)
-      : null;
-    const moduleType = moduleInstance
-      ? moduleInstance.type
-      : instanceId.replace(/^preview_/, "");
-    if (!moduleType) {
-      logger.error(`Could not find module type for instanceId: ${instanceId}`);
-      return;
-    }
-
-    // Remove existing module instances and release elements to the pool
-    const moduleInstances = this.activeModules[instanceId] || [];
-    forEach(moduleInstances, (instance) => {
-      if (isFunction(instance.destroy)) {
-        instance.destroy();
-      }
-    });
-    // Query specifically for elements with this instance ID to avoid affecting other instances
-    const moduleElems = modulesContainer.querySelectorAll(
-      `.module.${moduleType}[data-instance-id="${instanceId}"]`
-    );
-    forEach(moduleElems, (moduleElem) => {
-      modulesContainer.removeChild(moduleElem);
-      ElementPool.releaseElement(moduleElem);
-    });
-    this.activeModules[instanceId] = [];
-
-    // Create new module elements and instances
-    let ModuleClass;
-    try {
-      ModuleClass = await this.loadModuleClass(moduleType);
-      logger.log(`Module loaded: ${moduleType} (${instanceId})`);
-    } catch (error) {
-      logger.error(`Error loading module "${moduleType}":`, error);
-      return;
-    }
-
-    // Updated zIndex Assignment
-    const zIndex = this.activeTrack
-      ? this.activeTrack.modules.findIndex((m) => m.id === instanceId) + 1
-      : 1;
-
-    const newModuleInstances = [];
-    const fragment = document.createDocumentFragment();
-    const moduleElemsToInstantiate = [];
-
-    // Pre-compute styles
-    const width = `${100 / cols}%`;
-    const height = `${100 / rows}%`;
-    const border = matrixOptions.border ? "1px solid white" : "none";
-
-    for (let row = 1; row <= rows; row++) {
-      for (let col = 1; col <= cols; col++) {
-        const cellKey = `${row}-${col}`;
-        if (excludedCells.includes(cellKey)) {
-          continue; // Skip this cell
+        if (overlayDebug) {
+          const timestamp = (
+            debugContext.timestamp || performance.now() / 1000
+          ).toFixed(5);
+          let log = `[${timestamp}] Method Execution\n`;
+          if (debugContext.trackName) {
+            log += `  Track: ${debugContext.trackName}\n`;
+          }
+          if (debugContext.moduleInfo) {
+            log += `  Module: ${debugContext.moduleInfo.instanceId} (${debugContext.moduleInfo.type})\n`;
+          }
+          log += `  Method: ${methodName}\n`;
+          if (options && Object.keys(options).length > 0) {
+            log += `  Props: ${JSON.stringify(options, null, 2)}\n`;
+          }
+          this.queueDebugLog(log);
         }
 
-        // Get element from pool or clone from template
-        const moduleElem = ElementPool.getElement(moduleType);
+        if (debugEnabled) {
+          logger.log(`⏱️ Method start: ${methodName} for ${instanceId}`);
+        }
+        if (overlayDebug) {
+          Projector.logToMain(
+            `${JSON.stringify(options)} [${performance.now()}]`
+          );
+        }
 
-        // Tag element with instance ID for selective removal
-        moduleElem.dataset.instanceId = instanceId;
+        const host = this.trackSandboxHost;
+        if (!host) return;
+        const res = await host.invokeOnInstance(
+          instanceId,
+          methodName,
+          options
+        );
+        if (!res || res.ok !== true) {
+          throw new Error(res?.error || "SANDBOX_INVOKE_FAILED");
+        }
 
-        // Pre-compute and set styles using cssText
-        const top = `${(100 / rows) * (row - 1)}%`;
-        const left = `${(100 / cols) * (col - 1)}%`;
-        moduleElem.style.cssText = `
-          position: absolute;
-          width: ${width};
-          height: ${height};
-          top: ${top};
-          left: ${left};
-          z-index: ${zIndex};
-          border: ${border};
-        `;
-
-        fragment.appendChild(moduleElem);
-        moduleElemsToInstantiate.push(moduleElem);
-      }
-    }
-
-    // Append all elements at once
-    modulesContainer.appendChild(fragment);
-
-    // Instantiate modules in a single RAF
-    await new Promise((resolve) =>
-      requestAnimationFrame(() => {
-        forEach(moduleElemsToInstantiate, (moduleElem) => {
-          const moduleInstance = new ModuleClass(moduleElem);
-          newModuleInstances.push(moduleInstance);
-        });
-        resolve();
+        if (isConstructor) {
+          if (debugEnabled) {
+            logger.log(
+              `Executed constructor method "${methodName}" on module "${instanceId}".`
+            );
+          }
+        } else {
+          if (debugEnabled) {
+            logger.log(
+              `Executed method "${methodName}" with options ${JSON.stringify(
+                options
+              )} on module "${instanceId}".`
+            );
+          }
+        }
+        if (debugEnabled)
+          logger.log(`⏱️ Method end: ${methodName} for ${instanceId}`);
       })
     );
-
-    // Store the new instances
-    this.activeModules[instanceId] = newModuleInstances;
-
-    // Execute any constructor methods excluding "matrix"
-    // Only do this if we have an active track (not in preview mode)
-    if (this.activeTrack) {
-      const constructorMethods = get(
-        this.activeTrack,
-        ["modulesData", instanceId, "constructor"],
-        []
-      );
-      const filteredConstructorMethods = constructorMethods.filter(
-        (method) => method.name !== "matrix"
-      );
-
-      if (filteredConstructorMethods.length > 0) {
-        logger.log(`⏱️ Constructor methods start: ${instanceId}`);
-        await this.executeMethods(
-          filteredConstructorMethods,
-          instanceId,
-          newModuleInstances,
-          true
-        );
-        logger.log(`⏱️ Constructor methods end: ${instanceId}`);
-      }
+    if (debugEnabled) {
+      logger.log(`⏱️ Other methods execution end: ${instanceId}`);
+      logger.log(`⏱️ executeMethods end: ${instanceId}`);
     }
-
-    logger.log(`⏱️ updateMatrix end: ${instanceId}`);
   },
 
   toggleAspectRatioStyle(selectedRatioId) {
@@ -1131,7 +1267,9 @@ const Projector = {
       (r) => r.id === selectedRatioId
     );
     if (!ratio) {
-      logger.warn(`Aspect ratio "${selectedRatioId}" not found in settings`);
+      if (logger.debugEnabled) {
+        logger.warn(`Aspect ratio "${selectedRatioId}" not found in settings`);
+      }
       document.body.style = ``;
       return;
     }
@@ -1158,7 +1296,9 @@ const Projector = {
   setBg(colorId) {
     const color = this.settings.backgroundColors.find((c) => c.id === colorId);
     if (!color) {
-      logger.warn(`Background color "${colorId}" not found in settings`);
+      if (logger.debugEnabled) {
+        logger.warn(`Background color "${colorId}" not found in settings`);
+      }
       return;
     }
 
@@ -1175,51 +1315,92 @@ const Projector = {
   },
 
   async previewModule(moduleName, moduleData) {
-    logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    logger.log(`🎨 [PREVIEW] Starting preview for module: ${moduleName}`);
-    logger.log(`🎨 [PREVIEW] Module data received:`, moduleData);
-
-    logger.log(`🎨 [PREVIEW] Clearing any existing preview...`);
-    this.clearPreview();
+    const token = ++this.previewToken;
+    const debugEnabled = logger.debugEnabled;
+    if (debugEnabled) {
+      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      logger.log(`🎨 [PREVIEW] Starting preview for module: ${moduleName}`);
+      logger.log(`🎨 [PREVIEW] Module data received:`, moduleData);
+      logger.log(`🎨 [PREVIEW] Clearing any existing preview...`);
+    }
+    const prevName = this.previewModuleName;
+    if (prevName) {
+      this.clearPreviewForModule(prevName);
+    }
 
     const modulesContainer = document.querySelector(".modules");
-    logger.log(`🎨 [PREVIEW] Modules container found:`, !!modulesContainer);
+    if (debugEnabled) {
+      logger.log(`🎨 [PREVIEW] Modules container found:`, !!modulesContainer);
+    }
     if (!modulesContainer) {
       logger.error("❌ [PREVIEW] No .modules container found in DOM");
       return;
     }
 
+    if (token !== this.previewToken) {
+      return;
+    }
+
     try {
-      logger.log(`🎨 [PREVIEW] Setting preview module name: ${moduleName}`);
+      if (debugEnabled) {
+        logger.log(`🎨 [PREVIEW] Setting preview module name: ${moduleName}`);
+      }
       this.previewModuleName = moduleName;
-      // Use a special preview key to avoid conflicts with instance IDs
       const previewKey = `preview_${moduleName}`;
-      this.activeModules[previewKey] = [];
 
-      logger.log(`🎨 [PREVIEW] Executing constructor methods...`);
-      if (moduleData?.constructor && moduleData.constructor.length > 0) {
-        logger.log(
-          `🎨 [PREVIEW] Constructor methods found (${moduleData.constructor.length}):`,
-          moduleData.constructor
-        );
+      const src = await this.loadWorkspaceModuleSource(moduleName);
+      const moduleSources = { [moduleName]: { text: src?.text || "" } };
 
-        await this.executeMethods(
-          moduleData.constructor,
-          previewKey,
-          this.activeModules[previewKey],
-          true
-        );
-
-        logger.log(`✅ [PREVIEW] Constructor methods executed`);
-        logger.log(
-          `✅ [PREVIEW] Created ${this.activeModules[previewKey].length} instance(s)`
-        );
+      if (this.activeTrack?.name) {
+        this.restoreTrackNameAfterPreview = this.activeTrack.name;
       } else {
-        logger.log(`⚠️ [PREVIEW] No constructor methods to execute`);
+        this.restoreTrackNameAfterPreview = null;
       }
 
-      logger.log(`✅✅✅ [PREVIEW] Preview active for: ${moduleName}`);
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      try {
+        this.trackSandboxHost?.destroy?.();
+      } catch {}
+      this.trackSandboxHost = new TrackSandboxHost(modulesContainer);
+      this.trackModuleSources = moduleSources;
+
+      await this.trackSandboxHost.ensureSandbox();
+      const assetsBaseUrl = this.getAssetsBaseUrlForSandboxToken(
+        this.trackSandboxHost.token
+      );
+      if (!assetsBaseUrl) throw new Error("ASSETS_BASE_URL_UNAVAILABLE");
+
+      const track = {
+        name: `preview:${moduleName}`,
+        modules: [{ id: previewKey, type: moduleName }],
+        modulesData: {
+          [previewKey]: {
+            constructor: Array.isArray(moduleData?.constructor)
+              ? moduleData.constructor
+              : [],
+          },
+        },
+      };
+
+      const res = await this.trackSandboxHost.initTrack({
+        track,
+        moduleSources,
+        assetsBaseUrl,
+      });
+      if (!res || res.ok !== true) {
+        throw new Error(res?.error || "SANDBOX_PREVIEW_INIT_FAILED");
+      }
+      this.activeModules[previewKey] = [{}];
+
+      if (token !== this.previewToken) {
+        this.clearPreviewForModule(moduleName);
+        if (debugEnabled) logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+        return;
+      }
+
+      if (debugEnabled) {
+        logger.log(`✅✅✅ [PREVIEW] Preview active for: ${moduleName}`);
+        logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      }
     } catch (error) {
       logger.error(
         `❌ [PREVIEW] Error instantiating module "${moduleName}":`,
@@ -1227,123 +1408,102 @@ const Projector = {
       );
       logger.error(`❌ [PREVIEW] Error stack:`, error.stack);
 
-      this.clearPreview();
+      this.clearPreviewForModule(moduleName);
 
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      if (debugEnabled) logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     }
   },
 
   clearPreview() {
-    logger.log(`🧹 [PREVIEW] clearPreview called`);
+    this.previewToken++;
+    const debugEnabled = logger.debugEnabled;
+    if (debugEnabled) logger.log(`🧹 [PREVIEW] clearPreview called`);
 
     if (!this.previewModuleName) {
-      logger.log(`🧹 [PREVIEW] No preview module to clear`);
+      if (debugEnabled) logger.log(`🧹 [PREVIEW] No preview module to clear`);
       return;
     }
 
     const moduleName = this.previewModuleName;
-    logger.log(`🧹 [PREVIEW] Clearing preview for: ${moduleName}`);
+    this.clearPreviewForModule(moduleName);
+  },
+
+  clearPreviewForModule(moduleName) {
+    const debugEnabled = logger.debugEnabled;
+    if (debugEnabled)
+      logger.log(`🧹 [PREVIEW] Clearing preview for: ${moduleName}`);
 
     const modulesContainer = document.querySelector(".modules");
     if (!modulesContainer) {
       logger.error("❌ [PREVIEW] No .modules container found");
-      this.previewModuleName = null;
+      if (this.previewModuleName === moduleName) {
+        this.previewModuleName = null;
+      }
       return;
     }
 
     const previewKey = `preview_${moduleName}`;
-    const instances = this.activeModules[previewKey] || [];
-    logger.log(
-      `🧹 [PREVIEW] Found ${instances.length} instance(s) to clean up`
-    );
+    try {
+      this.trackSandboxHost?.destroy?.();
+    } catch {}
+    this.trackSandboxHost = null;
+    this.trackModuleSources = null;
+    try {
+      modulesContainer.textContent = "";
+    } catch {}
 
-    forEach(instances, (instance) => {
-      if (isFunction(instance.destroy)) {
-        logger.log(`🧹 [PREVIEW] Calling destroy() on instance...`);
-        try {
-          instance.destroy();
-          logger.log(`✅ [PREVIEW] Instance destroyed successfully`);
-        } catch (error) {
-          logger.error(`❌ [PREVIEW] Error destroying preview:`, error);
-          logger.error(`❌ [PREVIEW] Error stack:`, error.stack);
-        }
-      }
-    });
+    if (this.activeModules[previewKey]) {
+      delete this.activeModules[previewKey];
+    }
+    if (this.previewModuleName === moduleName) {
+      this.previewModuleName = null;
+    }
+    if (debugEnabled)
+      logger.log(`✅✅✅ [PREVIEW] Preview cleared successfully`);
 
-    // Only remove preview elements (those with preview_ prefix in data-instance-id)
-    const moduleElems = modulesContainer.querySelectorAll(
-      `.module.${moduleName}[data-instance-id="${previewKey}"]`
-    );
-    logger.log(`🧹 [PREVIEW] Found ${moduleElems.length} element(s) to remove`);
-
-    forEach(moduleElems, (moduleElem) => {
-      if (moduleElem.parentNode === modulesContainer) {
-        modulesContainer.removeChild(moduleElem);
-        ElementPool.releaseElement(moduleElem);
-      }
-    });
-
-    delete this.activeModules[previewKey];
-    this.previewModuleName = null;
-    logger.log(`✅✅✅ [PREVIEW] Preview cleared successfully`);
+    const restore = this.restoreTrackNameAfterPreview;
+    this.restoreTrackNameAfterPreview = null;
+    if (restore) {
+      this.handleTrackSelection(restore);
+    }
   },
 
   async triggerPreviewMethod(moduleName, methodName, options) {
-    logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    logger.log(
-      `🎯 [PREVIEW] Triggering method "${methodName}" on preview: ${moduleName}`
-    );
-    logger.log(`🎯 [PREVIEW] Options:`, options);
+    const debugEnabled = logger.debugEnabled;
+    if (debugEnabled) {
+      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      logger.log(
+        `🎯 [PREVIEW] Triggering method "${methodName}" on preview: ${moduleName}`
+      );
+      logger.log(`🎯 [PREVIEW] Options:`, options);
+    }
 
     if (!this.previewModuleName || this.previewModuleName !== moduleName) {
       logger.error(`❌ [PREVIEW] No active preview for module: ${moduleName}`);
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      if (debugEnabled) logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       return;
     }
 
     const previewKey = `preview_${moduleName}`;
-    const instances = this.activeModules[previewKey] || [];
-
-    if (instances.length === 0) {
-      logger.error(
-        `❌ [PREVIEW] No instances found for preview: ${moduleName}`
-      );
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-      return;
-    }
-
-    logger.log(
-      `🎯 [PREVIEW] Found ${instances.length} instance(s) to trigger method on`
-    );
+    const host = this.trackSandboxHost;
+    if (!host) return;
 
     try {
-      await Promise.all(
-        instances.map(async (instance) => {
-          if (isFunction(instance[methodName])) {
-            logger.log(
-              `🎯 [PREVIEW] Executing method "${methodName}" on instance...`
-            );
-            await instance[methodName](options);
-            logger.log(
-              `✅ [PREVIEW] Method "${methodName}" executed successfully`
-            );
-          } else {
-            logger.warn(
-              `⚠️ [PREVIEW] Method "${methodName}" does not exist on instance`
-            );
-          }
-        })
-      );
-
-      logger.log(`✅✅✅ [PREVIEW] Method trigger completed`);
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      const res = await host.invokeOnInstance(previewKey, methodName, options);
+      if (!res || res.ok !== true) {
+        throw new Error(res?.error || "SANDBOX_PREVIEW_INVOKE_FAILED");
+      }
+      if (debugEnabled) {
+        logger.log(`✅✅✅ [PREVIEW] Method trigger completed`);
+        logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      }
     } catch (error) {
       logger.error(
         `❌ [PREVIEW] Error triggering method "${methodName}":`,
         error
       );
       logger.error(`❌ [PREVIEW] Error stack:`, error.stack);
-      logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      if (debugEnabled) logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     }
   },
 };

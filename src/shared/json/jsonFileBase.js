@@ -1,73 +1,63 @@
-import fs from "fs";
-import path from "path";
-import {
-  atomicWriteFile,
-  atomicWriteFileSync,
-  cleanupStaleTempFiles,
-} from "./atomicWrite.js";
+const getBridge = () => globalThis.nwWrldAppBridge;
 
-const getJsonPath = (filename) => {
-  const srcDir = path.join(__dirname, "..", "..");
-  return path.join(srcDir, "shared", "json", filename);
-};
+export const getJsonDir = () => null;
 
-const jsonDir = path.join(__dirname, "..", "..", "shared", "json");
-cleanupStaleTempFiles(jsonDir);
+export const getJsonFilePath = (filename) => filename;
 
 export const loadJsonFile = async (filename, defaultValue, warningMsg) => {
-  const filePath = getJsonPath(filename);
+  const bridge = getBridge();
+  if (!bridge || !bridge.json || typeof bridge.json.read !== "function") {
+    if (warningMsg) console.warn(warningMsg);
+    return defaultValue;
+  }
   try {
-    const data = await fs.promises.readFile(filePath, "utf-8");
-    return JSON.parse(data);
-  } catch (error) {
-    if (warningMsg) console.warn(warningMsg, error);
-
-    try {
-      const backupPath = `${filePath}.backup`;
-      const backupData = await fs.promises.readFile(backupPath, "utf-8");
-      console.warn(`Restored ${filename} from backup`);
-      return JSON.parse(backupData);
-    } catch (backupError) {
-      return defaultValue;
-    }
+    return await bridge.json.read(filename, defaultValue);
+  } catch (e) {
+    if (warningMsg) console.warn(warningMsg, e);
+    return defaultValue;
   }
 };
 
 export const loadJsonFileSync = (filename, defaultValue, errorMsg) => {
-  const filePath = getJsonPath(filename);
+  const bridge = getBridge();
+  if (!bridge || !bridge.json || typeof bridge.json.readSync !== "function") {
+    if (errorMsg) console.error(errorMsg);
+    return defaultValue;
+  }
   try {
-    const data = fs.readFileSync(filePath, "utf-8");
-    return JSON.parse(data);
-  } catch (error) {
-    if (errorMsg) console.error(errorMsg, error);
-
-    try {
-      const backupPath = `${filePath}.backup`;
-      const backupData = fs.readFileSync(backupPath, "utf-8");
-      console.warn(`Restored ${filename} from backup`);
-      return JSON.parse(backupData);
-    } catch (backupError) {
-      return defaultValue;
-    }
+    return bridge.json.readSync(filename, defaultValue);
+  } catch (e) {
+    if (errorMsg) console.error(errorMsg, e);
+    return defaultValue;
   }
 };
 
 export const saveJsonFile = async (filename, data) => {
-  const filePath = getJsonPath(filename);
-  try {
-    const dataString = JSON.stringify(data, null, 2);
-    await atomicWriteFile(filePath, dataString);
-  } catch (error) {
-    console.error(`Error writing ${filename}:`, error);
+  const bridge = getBridge();
+  if (!bridge || !bridge.json || typeof bridge.json.write !== "function") {
+    console.error(`Refusing to write ${filename}: json bridge is unavailable.`);
+    return;
+  }
+  const res = await bridge.json.write(filename, data);
+  if (res && res.ok === false) {
+    console.error(
+      `Refusing to write ${filename}: project folder is not available (${res.reason}).`
+    );
   }
 };
 
 export const saveJsonFileSync = (filename, data) => {
-  const filePath = getJsonPath(filename);
-  try {
-    const dataString = JSON.stringify(data, null, 2);
-    atomicWriteFileSync(filePath, dataString);
-  } catch (error) {
-    console.error(`Error writing ${filename} (sync):`, error);
+  const bridge = getBridge();
+  if (!bridge || !bridge.json || typeof bridge.json.writeSync !== "function") {
+    console.error(
+      `Refusing to write ${filename} (sync): json bridge is unavailable.`
+    );
+    return;
+  }
+  const res = bridge.json.writeSync(filename, data);
+  if (res && res.ok === false) {
+    console.error(
+      `Refusing to write ${filename} (sync): project folder is not available (${res.reason}).`
+    );
   }
 };

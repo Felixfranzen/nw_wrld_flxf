@@ -1,13 +1,11 @@
-import ModuleBase from "../helpers/moduleBase.js";
-import p5 from "p5";
+/*
+@nwWrld name: OrbitalPlane
+@nwWrld category: 2D
+@nwWrld imports: ModuleBase, p5
+*/
 
 class OrbitalPlane extends ModuleBase {
-  static name = "OrbitalPlane";
-  static category = "2D";
-
-  static methods = [
-    ...ModuleBase.methods,
-  ];
+  static methods = [];
 
   constructor(container) {
     super(container);
