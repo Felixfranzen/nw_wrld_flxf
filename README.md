@@ -17,12 +17,14 @@ This project is currently in beta. Downloadable installers are not currently pro
 
 - [x] Isolated sandbox and module-workspace bundling
 - [x] Docblock-declared module dependencies with automated runtime injection
+- [ ] TypeScript migration
 - [ ] Signed and notarized macOS builds + signed Windows builds for frictionless installs
+- [ ] Linux support
 - [ ] Userdata and module versioning (plus migration scripts)
 - [ ] Multi-band audio threshold analysis (local processing) for channel triggers
 - [ ] Remote API input source with HTTP/WebSocket client for cloud-based services (audio analysis APIs, ML models, etc.)
 - [ ] Serial port input support for hardware sensor integration
-- [ ] Full TypeScript migration
+- [ ] JSON versioning (and migration scripts)
 
 ## Features
 
