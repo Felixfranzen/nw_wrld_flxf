@@ -1323,11 +1323,7 @@ const Projector = {
       return;
     }
 
-    if (
-      ratio.id === "default" ||
-      ratio.id === "16-9" ||
-      ratio.id === "landscape"
-    ) {
+    if (ratio.id === "default" || ratio.id === "landscape") {
       document.body.style = ``;
     } else {
       if (ratio.id === "9-16") {
@@ -1337,7 +1333,7 @@ const Projector = {
       }
 
       document.body.style = `
-        width: ${ratio.width}; 
+        width: ${ratio.width};
         height: ${ratio.height};
         position: relative;
         margin: 0 auto;
