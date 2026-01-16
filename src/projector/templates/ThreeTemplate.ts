@@ -8,7 +8,7 @@ export class ThreeTemplate extends BaseThreeJsModule {
   static methods = [...BaseThreeJsModule.methods];
 
   customGroup: THREE.Group | null;
-  customObjects: Array<THREE.Mesh<any, any>>;
+  customObjects: Array<THREE.Mesh<THREE.BufferGeometry, THREE.Material | THREE.Material[]>>;
 
   constructor(container) {
     super(container);

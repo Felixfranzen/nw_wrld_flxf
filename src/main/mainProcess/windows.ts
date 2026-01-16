@@ -77,7 +77,7 @@ export const applyProjectorWindowAspectRatio = (aspectRatioId: unknown): void =>
     const display = screen.getDisplayMatching(bounds);
     const workArea = (display as { workArea?: unknown })?.workArea || bounds;
 
-    let available = {
+    const available = {
       x: (workArea as Electron.Rectangle).x,
       y: (workArea as Electron.Rectangle).y,
       width: (workArea as Electron.Rectangle).width,

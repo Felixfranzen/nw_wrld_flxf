@@ -4,7 +4,7 @@ import { TextInput, NumberInput, ColorInput, Select, Checkbox } from "./FormInpu
 import { MatrixGrid } from "../shared/MatrixGrid.jsx";
 import { AssetOptionInput as AssetOptionInputRaw } from "./AssetOptionInput.jsx";
 
-const AssetOptionInput = AssetOptionInputRaw as unknown as ComponentType<any>;
+const AssetOptionInput = AssetOptionInputRaw as unknown as ComponentType<Record<string, unknown>>;
 
 const CUSTOM_VALUE = "__nw_wrld_custom__";
 
@@ -713,7 +713,7 @@ export const MethodBlock = memo(
                       className="w-[192px] text-[11px] text-neutral-300 font-mono flex items-center gap-2"
                       key={option.name}
                     >
-                      <span>ERROR: Missing key "{option.name}"</span>
+                      <span>ERROR: Missing key &quot;{option.name}&quot;</span>
                       <button
                         onClick={() => onAddMissingOption(method.name, option.name)}
                         className="py-0.5 px-2 text-[11px] font-mono bg-white/5 text-neutral-300 border border-neutral-300 cursor-pointer whitespace-nowrap hover:bg-neutral-300 hover:text-[#101010]"
