@@ -246,14 +246,15 @@ export const useWorkspaceModules = ({
 
   useEffect(() => {
     try {
-      if (module && (module as any).hot) {
+      const maybeHot = (module as unknown as { hot?: { accept: (path: string, cb: () => void) => void } })?.hot;
+      if (maybeHot) {
         try {
-          (module as any).hot.accept("../../../projector/helpers/moduleBase", () => {
+          maybeHot.accept("../../../projector/helpers/moduleBase", () => {
             loadModules();
           });
         } catch {}
         try {
-          (module as any).hot.accept("../../../projector/helpers/threeBase.js", () => {
+          maybeHot.accept("../../../projector/helpers/threeBase.js", () => {
             loadModules();
           });
         } catch {}

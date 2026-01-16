@@ -291,7 +291,9 @@ const destroyInstance = (instanceId) => {
     const nodes = document.querySelectorAll(`[data-instance-id="${safeId}"]`);
     nodes.forEach((n) => {
       try {
-        n.parentNode && n.parentNode.removeChild(n);
+        if (n.parentNode) {
+          n.parentNode.removeChild(n);
+        }
       } catch {}
     });
   } catch {}

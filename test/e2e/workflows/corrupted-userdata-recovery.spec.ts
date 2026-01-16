@@ -118,7 +118,8 @@ test("userData.json missing required fields is sanitized and app remains usable"
 
     const readResult = await dashboard.evaluate(async () => {
       const fallback = { config: {}, sets: [{ id: "set_1", name: "Set 1", tracks: [] }] };
-      const read = (globalThis as any)?.nwWrldAppBridge?.json?.read;
+      const g = globalThis as unknown as { nwWrldAppBridge?: { json?: { read?: unknown } } };
+      const read = g.nwWrldAppBridge?.json?.read;
       if (typeof read !== "function") return null;
       return await read("userData.json", fallback);
     });
@@ -127,7 +128,8 @@ test("userData.json missing required fields is sanitized and app remains usable"
     expect(Array.isArray(sets)).toBe(true);
     expect(
       (sets as unknown[]).some(
-        (s) => Boolean(s) && typeof s === "object" && (s as Record<string, unknown>).name === "Set 1"
+        (s) =>
+          Boolean(s) && typeof s === "object" && (s as Record<string, unknown>).name === "Set 1"
       )
     ).toBe(true);
   } finally {
@@ -137,4 +139,3 @@ test("userData.json missing required fields is sanitized and app remains usable"
     await cleanup();
   }
 });
-
