@@ -64,6 +64,13 @@ export function initDashboardIpc(this: DashboardIpcContext) {
           this.introspectModule(moduleId).then((result) => {
             const messaging = getMessaging();
             messaging?.sendToDashboard?.("module-introspect-result", result);
+          }).catch((error) => {
+            const messaging = getMessaging();
+            messaging?.sendToDashboard?.("module-introspect-result", {
+              moduleId,
+              ok: false,
+              error: (error as { message?: unknown } | null)?.message || "INTROSPECTION_ERROR"
+            });
           });
           return;
         }

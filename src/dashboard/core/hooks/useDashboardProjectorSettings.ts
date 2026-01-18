@@ -40,11 +40,21 @@ export const useDashboardProjectorSettings = ({
       const storedAspect = (cfg as Record<string, unknown>).aspectRatio;
       const nextAspectRaw = typeof storedAspect === "string" ? storedAspect : "";
       const nextAspect = !nextAspectRaw || nextAspectRaw === "landscape" ? "default" : nextAspectRaw;
-      setAspectRatio(String(nextAspect));
+      setAspectRatio((prev) => {
+        if (String(nextAspect) !== prev) {
+          return String(nextAspect);
+        }
+        return prev;
+      });
 
       const storedBg = (cfg as Record<string, unknown>).bgColor;
       const nextBg = typeof storedBg === "string" && storedBg ? storedBg : "grey";
-      setBgColor(String(nextBg));
+      setBgColor((prev) => {
+        if (String(nextBg) !== prev) {
+          return String(nextBg);
+        }
+        return prev;
+      });
     }
   }, [userData]);
 
